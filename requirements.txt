@@ -1,0 +1,5 @@
+# WBO Animation: PySide6, OpenCV, Pillow. moviepy в проекте не используется.
+PySide6>=6.7.0,<6.10
+numpy>=1.26.0
+opencv-python>=4.9.0.0
+Pillow>=10.0.0
