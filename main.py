@@ -4,6 +4,8 @@ import json
 import time  # Для расчёта времени экспорта
 from pathlib import Path
 import tempfile  # Для временных файлов предпросмотра
+import subprocess
+import shutil
 
 import numpy as np  # Для математики наложения «Экран»
 import cv2  # Для работы с видео и изображениями
@@ -29,6 +31,7 @@ from PySide6.QtWidgets import (
     QFrame,
     QScrollArea,
     QSizePolicy,
+    QSizeGrip,
     QSplashScreen,
 )
 from PySide6.QtGui import (
@@ -42,8 +45,10 @@ from PySide6.QtGui import (
     QAction,
     QKeySequence,
     QShortcut,
+    QFont,
+    QFontDatabase,
 )
-from PySide6.QtCore import Qt, QSize, QUrl, QTimer, QByteArray
+from PySide6.QtCore import Qt, QSize, QUrl, QTimer, QByteArray, QCoreApplication, QProcess, QSettings
 
 try:
     from PySide6.QtSvg import QSvgRenderer
@@ -52,8 +57,14 @@ except ImportError:
     _HAS_SVG = False
 from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput
 
+from export_settings_dialog import ExportSettingsDialog
+from ui_common import DialogTitleBar
+
 
 # ВАЖНО: комментарии всегда на русском, не удалять при доработках
+
+# Версия приложения (для статус-бара, «О программе» и сплэша)
+APP_VERSION = "0.1.2.2"
 
 # Базовая папка приложения:
 # - при запуске из Python — корень проекта (рядом с main.py);
@@ -68,8 +79,17 @@ SOUND_EXPORT_READY = BASE_DIR / "Assets" / "sound" / "ok.mp3"
 SOUND_EXPORT_ERROR = BASE_DIR / "Assets" / "sound" / "error.mp3"
 SOUND_CLICK = BASE_DIR / "Assets" / "sound" / "click.mp3"
 SOUND_PORTFOLIO = BASE_DIR / "Assets" / "sound" / "portfolio.mp3"
+SOUND_OPEN = BASE_DIR / "Assets" / "sound" / "open.mp3"
+SOUND_DIALOG = BASE_DIR / "Assets" / "sound" / "dialog.mp3"
+SOUND_SPLASH_BANKA = BASE_DIR / "Assets" / "sound" / "banka_01.mp3"
 
 ICONS_DIR = BASE_DIR / "Assets" / "icons"
+FONTS_DIR = BASE_DIR / "Assets" / "fonts"
+APP_ICON_PATH = BASE_DIR / "Assets" / "images" / "faicon.png"
+
+# Семейства шрифтов после загрузки в main() (для сплэша и шапки)
+_google_sans_family = ""
+_unbounded_family = ""
 
 
 def load_phosphor_icon(name: str, size: int = 20, color: str = "#e0e0e0") -> QIcon:
@@ -101,167 +121,431 @@ def load_phosphor_icon(name: str, size: int = 20, color: str = "#e0e0e0") -> QIc
     return QIcon()
 
 
-# Стиль в духе Figma: плоский тёмный интерфейс, минималистичные контролы
+# Единая тёмная тема: один фон, одна рамка, аккуратный вид
 APP_STYLESHEET = """
     QMainWindow, QWidget {
-        background-color: #1F2125;
-        color: #F9FAFB;
+        background-color: #14181c;
+        color: #e6edf3;
+        font-size: 13px;
+    }
+    /* Шапка окна: оболочка и контур в наших цветах */
+    #titleBar {
+        background-color: #1a1f26;
+        border: 1px solid #2a3038;
+        border-bottom: none;
+        border-top: 2px solid #3d454f;
+        border-radius: 8px 8px 0 0;
+    }
+    #mainContainer {
+        background-color: #14181c;
+        border: 1px solid #2a3038;
+        border-top: none;
+        border-bottom: none;
+        border-radius: 0;
+    }
+    #titleButton,
+    #titleCloseButton {
+        background: transparent;
+        border: none;
+        color: #9ca3af;
+        padding: 0;
         font-size: 12px;
     }
+    #titleButton:hover {
+        background: rgba(42, 48, 56, 0.8);
+        color: #e5e7eb;
+    }
+    #titleCloseButton:hover {
+        background: #b91c1c;
+        color: #ffffff;
+    }
+    /* Нижняя строка статуса (контур сверху в наших цветах) */
+    #statusBar {
+        background-color: #1a1f26;
+        border: 1px solid #2a3038;
+        border-top: 2px solid #3d454f;
+        border-radius: 0 0 8px 8px;
+        padding: 4px 10px;
+        color: #8b949e;
+        font-size: 12px;
+    }
+    #statusBar QLabel {
+        color: #8b949e;
+        font-size: 12px;
+        background: transparent;
+    }
+    #statusState {
+        color: #b1b8c2;
+    }
     QMenuBar {
-        background-color: #18191C;
-        color: #E5E7EB;
+        background-color: #1a1f26;
+        color: #8b949e;
+        padding: 2px 0;
     }
     QMenuBar::item {
         padding: 4px 10px;
-        background: transparent;
-    }
-    QMenuBar::item:selected {
-        background: #272B33;
-    }
-    QMenu {
-        background-color: #18191C;
-        color: #E5E7EB;
-        border: 1px solid #2D323B;
-    }
-    QMenu::item {
-        padding: 6px 16px;
-    }
-    QMenu::item:selected {
-        background: #2D323B;
-    }
-    QLabel {
-        color: #E5E7EB;
-        font-size: 12px;
-    }
-    QLabel#sectionLabel {
-        color: #9CA3AF;
-        font-size: 11px;
-        font-weight: 600;
-        letter-spacing: 0.03em;
-        text-transform: uppercase;
-        margin-bottom: 4px;
-    }
-    QPushButton {
-        background-color: #2D323B;
-        color: #E5E7EB;
-        border: 1px solid #3B4250;
-        border-radius: 6px;
-        padding: 6px 12px;
-        font-size: 12px;
-    }
-    QPushButton:hover {
-        background-color: #353B47;
-        border-color: #4B5563;
-    }
-    QPushButton:pressed {
-        background-color: #23262F;
-    }
-    QPushButton:disabled {
-        color: #6B7280;
-        background-color: #1F2933;
-        border-color: #374151;
-    }
-    QPushButton[class=\"primary\"] {
-        background-color: #0ea5e9;
-        border-color: #0ea5e9;
-        color: #020617;
-        font-weight: 500;
-    }
-    QPushButton[class=\"primary\"]:hover {
-        background-color: #38bdf8;
-        border-color: #38bdf8;
-    }
-    QListWidget {
-        background-color: #181B20;
-        border: 1px solid #272B33;
-        border-radius: 8px;
-        padding: 6px;
-        color: #E5E7EB;
-        font-size: 12px;
-    }
-    QListWidget::item {
-        padding: 6px;
         border-radius: 4px;
     }
+    QMenuBar::item:selected {
+        background-color: #2d3542;
+        color: #e6edf3;
+    }
+    QMenu {
+        background-color: #1a1f26;
+        color: #e6edf3;
+        border: 1px solid #2a3038;
+        border-radius: 8px;
+        padding: 4px;
+    }
+    QMenu::item {
+        padding: 6px 12px;
+        border-radius: 4px;
+    }
+    QMenu::item:selected {
+        background-color: #2d3542;
+        color: #e6edf3;
+    }
+    QLabel {
+        color: #e6edf3;
+        font-size: 13px;
+        background: transparent;
+    }
+    QLabel#sectionLabel {
+        color: #b1b8c2;
+        font-size: 13px;
+        font-weight: 600;
+        letter-spacing: 0.02em;
+    }
+    QLabel#stepHint {
+        color: #8b949e;
+        font-size: 12px;
+    }
+    QPushButton {
+        background: transparent;
+        color: #e6edf3;
+        border: 1px solid #2a3038;
+        border-radius: 6px;
+        padding: 8px 14px;
+        font-size: 13px;
+    }
+    QPushButton:hover {
+        background: rgba(42, 48, 56, 0.6);
+        border-color: #3d454f;
+    }
+    QPushButton:pressed {
+        background: rgba(30, 35, 41, 0.9);
+    }
+    QPushButton:disabled {
+        color: #4b5563;
+        background: rgba(30, 35, 41, 0.5);
+        border-color: #2a3038;
+        opacity: 0.85;
+    }
+    QPushButton[class="primary"] {
+        background: transparent;
+        border: 1px solid #238636;
+        color: #3fb950;
+        font-weight: 600;
+    }
+    QPushButton[class="primary"]:hover {
+        background: rgba(35, 134, 54, 0.2);
+        border-color: #2ea043;
+        color: #56d364;
+    }
+    QPushButton[class="danger"] {
+        background: transparent;
+        border: 1px solid #da3633;
+        color: #f85149;
+    }
+    QPushButton[class="danger"]:hover {
+        background: rgba(218, 54, 51, 0.2);
+        border-color: #f85149;
+        color: #ff7b72;
+    }
+    QPushButton[class="danger"]:disabled,
+    QPushButton[class="iconOnly danger"]:disabled {
+        border-color: #2a3038;
+        color: #4b5563;
+    }
+    QPushButton[class="iconOnly danger"] {
+        background: transparent;
+        border: 1px solid #da3633;
+        color: #f85149;
+    }
+    QPushButton[class="iconOnly danger"]:hover {
+        background: rgba(218, 54, 51, 0.2);
+        border-color: #f85149;
+        color: #ff7b72;
+    }
+    QPushButton[class="iconOnly accent"] {
+        background: transparent;
+        border: 1px solid #388bfd;
+        color: #58a6ff;
+        padding: 8px;
+        min-width: 32px;
+    }
+    QPushButton[class="iconOnly accent"]:hover {
+        background: rgba(56, 139, 253, 0.2);
+        border-color: #58a6ff;
+        color: #79c0ff;
+    }
+    QPushButton[class="iconOnly accent"]:disabled {
+        border-color: #2a3038;
+        color: #4b5563;
+    }
+    QPushButton[class="accent"] {
+        background: transparent;
+        border: 1px solid #388bfd;
+        color: #58a6ff;
+    }
+    QPushButton[class="accent"]:hover {
+        background: rgba(56, 139, 253, 0.2);
+        border-color: #58a6ff;
+        color: #79c0ff;
+    }
+    QPushButton[class="iconOnly"] {
+        padding: 8px;
+        min-width: 32px;
+    }
+    QListWidget {
+        background: transparent;
+        border: 1px solid #2a3038;
+        border-radius: 8px;
+        padding: 2px;
+        color: #e6edf3;
+        font-size: 13px;
+    }
+    QListWidget::item {
+        padding: 0 2px;
+        border-radius: 2px;
+        background: transparent;
+    }
+    QListWidget[listMode="true"]::item {
+        height: 40px;
+        max-height: 40px;
+        padding: 0 4px;
+        margin: 0;
+    }
     QListWidget::item:selected {
-        background-color: #0ea5e9;
-        color: #020617;
+        background: #2d3542;
+        color: #e6edf3;
     }
     QListWidget::item:hover:!selected {
-        background-color: #272B33;
+        background: rgba(42, 48, 56, 0.5);
     }
+    /* Ползунки в стиле приложения: мягкие, без яркого синего */
     QSlider::groove:horizontal {
-        height: 4px;
-        background: #111827;
-        border-radius: 2px;
+        height: 6px;
+        background: #1e2329;
+        border: none;
+        border-radius: 3px;
     }
     QSlider::sub-page:horizontal {
-        background: #0ea5e9;
-        border-radius: 2px;
+        background: #3d454f;
+        border-radius: 3px;
     }
     QSlider::handle:horizontal {
-        width: 14px;
-        height: 14px;
+        width: 16px;
+        height: 16px;
         margin: -5px 0;
-        background: #F9FAFB;
-        border-radius: 7px;
-        border: 1px solid #0ea5e9;
+        background: #5c636e;
+        border: none;
+        border-radius: 8px;
     }
     QSlider::handle:horizontal:hover {
-        background: #E5E7EB;
+        background: #6e7681;
+    }
+    QSlider::handle:horizontal:pressed {
+        background: #8b949e;
+    }
+    QSlider#curveSlider::groove:horizontal {
+        height: 4px;
+    }
+    QSlider#curveSlider::handle:horizontal {
+        width: 12px;
+        height: 12px;
+        margin: -4px 0;
     }
     QCheckBox {
-        color: #E5E7EB;
-        spacing: 6px;
-        font-size: 12px;
+        color: #e6edf3;
+        spacing: 8px;
+        font-size: 13px;
     }
     QCheckBox::indicator {
         width: 16px;
         height: 16px;
-        border: 1px solid #4B5563;
+        border: 1px solid #2a3038;
         border-radius: 4px;
-        background: #111827;
+        background: transparent;
     }
     QCheckBox::indicator:checked {
-        background: #0ea5e9;
-        border-color: #0ea5e9;
+        background: #3d454f;
+        border-color: #4d5a6b;
+    }
+    /* Чекбокс «Один ролик для всех» — явная синяя галочка */
+    QCheckBox#singleVideoCheckbox::indicator {
+        width: 18px;
+        height: 18px;
+        border: 1px solid #2a3038;
+        border-radius: 4px;
+        background: #1e2329;
+    }
+    QCheckBox#singleVideoCheckbox::indicator:checked {
+        background: #2563eb;
+        border-color: #3b82f6;
+        image: url("{{CHECK_ICON}}");
+    }
+    /* Таймлайн превью: пусто — тёмный, пройденное — синее, ползунок видим */
+    QSlider#previewTimeline::groove:horizontal {
+        height: 8px;
+        background: #1e2329;
+        border: none;
+        border-radius: 4px;
+    }
+    QSlider#previewTimeline::sub-page:horizontal {
+        background: #2563eb;
+        border-radius: 4px;
+    }
+    QSlider#previewTimeline::handle:horizontal {
+        width: 14px;
+        height: 14px;
+        margin: -3px 0;
+        background: #e6edf3;
+        border: 1px solid #8b949e;
+        border-radius: 7px;
+    }
+    QSlider#previewTimeline::handle:horizontal:hover {
+        background: #ffffff;
     }
     QComboBox {
-        background-color: #181B20;
-        color: #E5E7EB;
-        border: 1px solid #3B4250;
+        background: transparent;
+        color: #e6edf3;
+        border: 1px solid #2a3038;
         border-radius: 6px;
-        padding: 4px 10px;
-        font-size: 12px;
-        min-height: 24px;
+        padding: 6px 12px;
+        padding-right: 28px;
+        font-size: 13px;
+        min-height: 32px;
     }
     QComboBox:hover {
-        border-color: #4B5563;
+        border-color: #3d454f;
     }
     QComboBox::drop-down {
-        border: none;
-        width: 22px;
+        subcontrol-origin: padding;
+        subcontrol-position: right;
+        width: 24px;
+        border-left: 1px solid #2a3038;
+        border-top-right-radius: 5px;
+        border-bottom-right-radius: 5px;
+        background: rgba(42, 48, 56, 0.5);
+    }
+    QComboBox::down-arrow {
+        image: url("{{CHEVRON_DOWN}}");
+        width: 14px;
+        height: 14px;
     }
     QComboBox QAbstractItemView {
-        background: #111827;
-        color: #E5E7EB;
-        selection-background-color: #0ea5e9;
-        selection-color: #020617;
+        background: #1a1f26;
+        color: #e6edf3;
+        selection-background-color: #2d3542;
+        selection-color: #e6edf3;
+        border: 1px solid #2a3038;
         border-radius: 6px;
     }
     QFrame#panel {
-        background-color: #181B20;
-        border: 1px solid #272B33;
-        border-radius: 10px;
-        margin: 4px 0;
-        padding: 12px;
+        background: transparent;
+        border: 1px solid #2a3038;
+        border-radius: 8px;
+        margin: 2px 0;
+        padding: 10px;
     }
     QScrollArea {
         border: none;
         background: transparent;
     }
+    QScrollBar:vertical {
+        background: #1e2329;
+        width: 12px;
+        border-radius: 6px;
+        margin: 0;
+    }
+    QScrollBar::handle:vertical {
+        background: #424a56;
+        border-radius: 5px;
+        min-height: 24px;
+    }
+    QScrollBar::handle:vertical:hover {
+        background: #5c636e;
+    }
+    QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+        height: 0;
+    }
+    QScrollBar:horizontal {
+        background: #1e2329;
+        height: 12px;
+        border-radius: 6px;
+        margin: 0;
+    }
+    QScrollBar::handle:horizontal {
+        background: #424a56;
+        border-radius: 5px;
+        min-width: 24px;
+    }
+    QScrollBar::handle:horizontal:hover {
+        background: #5c636e;
+    }
+    QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {
+        width: 0;
+    }
+    #sizeGripIcon {
+        color: #6b7280;
+        font-size: 14px;
+        background: transparent;
+    }
+    /* Всплывающие подсказки в стиле приложения */
+    QToolTip {
+        background-color: #1e2329;
+        color: #e6edf3;
+        border: 1px solid #3d454f;
+        border-radius: 6px;
+        padding: 6px 10px;
+        font-size: 12px;
+    }
 """
+
+# Общий стиль для диалогов из меню «Помощь» (О программе, Справка, История, Автор)
+HELP_DIALOG_STYLE = """
+    QDialog { background-color: #16181c; border-radius: 8px; border: 1px solid #2a3038; }
+    QLabel { color: #e2e8f0; font-size: 13px; background: transparent; }
+    QScrollArea { border: none; background: transparent; }
+    QPushButton { background: transparent; color: #e2e8f0; border: 1px solid #475569; border-radius: 4px; padding: 6px 12px; font-size: 13px; }
+    QPushButton:hover { background: rgba(71, 85, 105, 0.5); }
+"""
+
+
+def _format_readme_for_display(raw: str) -> str:
+    """Убирает markdown-разметку из README для читаемого отображения в диалоге."""
+    lines = raw.split("\n")
+    result: list[str] = []
+    in_code_block = False
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith("```"):
+            in_code_block = not in_code_block
+            continue
+        if in_code_block:
+            continue
+        if stripped.startswith("## "):
+            result.append("")
+            result.append(stripped[3:].strip())
+            result.append("")
+            continue
+        if stripped.startswith("# "):
+            result.append(stripped[2:].strip())
+            result.append("")
+            continue
+        result.append(line)
+    return "\n".join(result).strip()
 
 
 class SoundPlayer:
@@ -291,6 +575,15 @@ class SoundPlayer:
             # Нам важно не уронить приложение, даже если аудио не воспроизвелось
             pass
 
+    @classmethod
+    def stop(cls) -> None:
+        """Остановить текущее воспроизведение, если оно есть."""
+        try:
+            if cls._player is not None:
+                cls._player.stop()
+        except Exception:
+            pass
+
 
 CONFIG_FILE = "wbo_config.json"
 
@@ -303,6 +596,15 @@ def load_config() -> dict:
             "last_export_path": str(Path.cwd()),
             "last_images_path": str(Path("Assets/demo").resolve()),
             "last_video_path": str(Path("Assets/video").resolve()),
+            # Качество рендера: quality / balanced / fast
+            "render_preset": "balanced",
+            # Настройки экспорта (сохраняются между запусками)
+            # codec: h264, mpeg4 (по умолчанию h264)
+            "export_codec": "h264",
+            # size: "900x1200" или "819x1080" (строка, чтобы было проще хранить)
+            "export_size": "900x1200",
+            # целевой FPS экспорта: 24 / 30 / 60
+            "export_fps": 60,
         }
     try:
         with open(CONFIG_FILE, "r", encoding="utf-8") as f:
@@ -313,6 +615,10 @@ def load_config() -> dict:
     data.setdefault("last_export_path", str(Path.cwd()))
     data.setdefault("last_images_path", str(Path("Assets/demo").resolve()))
     data.setdefault("last_video_path", str(Path("Assets/video").resolve()))
+    data.setdefault("render_preset", "balanced")
+    data.setdefault("export_codec", "h264")
+    data.setdefault("export_size", "900x1200")
+    data.setdefault("export_fps", 60)
     return data
 
 
@@ -339,6 +645,46 @@ class ImageItemData:
         self.curve_shadows: int = 64
         self.curve_midtones: int = 128
         self.curve_highlights: int = 192
+
+
+class CurvePreviewLabel(QLabel):
+    """Превью графика кривой с возможностью изменения точек по клику/перетаскиванию."""
+
+    def __init__(self, parent: "MainWindow", size: int = 128) -> None:
+        super().__init__(parent)
+        self._main = parent
+        self._size = size
+        self._margin = 14
+        self.setFixedSize(size, size)
+        self.setStyleSheet(
+            "background: transparent; border: 1px solid #30363d; border-radius: 6px;"
+        )
+        self.setAlignment(Qt.AlignCenter)
+        self.setCursor(Qt.CursorShape.CrossCursor)
+        self.setMouseTracking(True)
+        self.setToolTip("Клик или перетаскивание по графику меняет точку (тени / средние / света)")
+
+    def _widget_to_curve(self, x: int, y: int) -> tuple[int, int]:
+        """Преобразование координат виджета в (x_in 0–255, y_out 0–255)."""
+        m = self._margin
+        g = self._size - 2 * m
+        if g <= 0:
+            return 128, 128
+        x_in = int(255 * (x - m) / g)
+        y_out = int(255 * (m + g - y) / g)
+        return max(0, min(255, x_in)), max(0, min(255, y_out))
+
+    def mousePressEvent(self, event) -> None:
+        super().mousePressEvent(event)
+        if event.button() == Qt.MouseButton.LeftButton and self._main is not None:
+            x_in, y_out = self._widget_to_curve(event.position().x(), event.position().y())
+            self._main._on_curve_preview_clicked(x_in, y_out)
+
+    def mouseMoveEvent(self, event) -> None:
+        super().mouseMoveEvent(event)
+        if event.buttons() & Qt.MouseButton.LeftButton and self._main is not None:
+            x_in, y_out = self._widget_to_curve(event.position().x(), event.position().y())
+            self._main._on_curve_preview_clicked(x_in, y_out)
 
 
 class ImageListWidget(QListWidget):
@@ -396,8 +742,25 @@ class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
 
+        # Стандартная оболочка окна Windows (рамка и заголовок) —
+        # оставляем поведение Windows, а внутри настраиваем оформление.
+        self.setWindowFlags(
+            Qt.WindowType.Window
+            | Qt.WindowType.WindowSystemMenuHint
+            | Qt.WindowType.WindowMinMaxButtonsHint
+            | Qt.WindowType.WindowCloseButtonHint
+        )
+        self._drag_active = False
+        self._drag_pos = None
+
         # Конфигурация (пути и т.п.)
         self.config = load_config()
+        # Режим рендера: "quality" | "balanced" | "fast"
+        self.render_preset: str = self.config.get("render_preset", "balanced")
+        # Настройки экспорта (сохраняются между запусками)
+        self.export_codec: str = self.config.get("export_codec", "h264")
+        self.export_size_str: str = self.config.get("export_size", "900x1200")
+        self.export_fps: int = int(self.config.get("export_fps", 60) or 60)
 
         # Текущее выбранное общее видео для наложения
         self.global_video_path: str | None = None
@@ -411,17 +774,27 @@ class MainWindow(QMainWindow):
         self.preview_cap: cv2.VideoCapture | None = None
         self.preview_playing: bool = True
         self.preview_fps: float = 25.0
+        self.preview_total_frames: int = 1
         self.preview_last_frame: np.ndarray | None = None  # последний кадр для перерисовки при паузе
         self._preview_timer = QTimer(self)
         self._preview_timer.timeout.connect(self._on_preview_tick)
 
-        # Режимы предпросмотра (разрешение превью, влияет только на скорость и качество просмотра)
+        # Режимы предпросмотра (уменьшенное превью, чтобы не занимало весь центр).
         # Экспорт по-прежнему делается в 900x1200.
-        self.preview_target_w = 540
-        self.preview_target_h = 720
+        self.preview_target_w = 320
+        self.preview_target_h = 426
 
-        self.setWindowTitle("WBO Animation - генератор видео-карточек")
-        self.resize(1000, 600)
+        self.setWindowTitle("Wbo BAMP — генератор видео-карточек")
+        # Размер окна: при первом запуске — крупнее; потом восстанавливаем последний
+        settings = QSettings("WboBAMP", "WboBAMP")
+        saved_geom = settings.value("mainWindow/geometry")
+        if saved_geom and isinstance(saved_geom, QByteArray):
+            self.restoreGeometry(saved_geom)
+        else:
+            self.resize(1100, 720)
+
+        if APP_ICON_PATH.exists():
+            self.setWindowIcon(QIcon(str(APP_ICON_PATH)))
 
         # Разрешаем drag & drop на всё окно, чтобы было проще попадать
         self.setAcceptDrops(True)
@@ -447,9 +820,47 @@ class MainWindow(QMainWindow):
             event.ignore()
 
     def closeEvent(self, event) -> None:
-        """При закрытии окна останавливаем превью-видео и освобождаем ресурсы."""
+        """При закрытии окна сохраняем размер/позицию и останавливаем превью."""
+        settings = QSettings("WboBAMP", "WboBAMP")
+        settings.setValue("mainWindow/geometry", self.saveGeometry())
         self._stop_preview_video()
         super().closeEvent(event)
+
+    # --- Перезапуск приложения (используется после установки FFmpeg) ---
+    def _restart_app(self) -> None:
+        """Перезапуск текущего приложения (работает и для .py, и для .exe)."""
+        try:
+            if getattr(sys, "frozen", False):
+                exe_path = sys.executable
+                QProcess.startDetached(exe_path, [])
+            else:
+                script = Path(__file__).resolve()
+                QProcess.startDetached(sys.executable, [str(script)])
+        except Exception:
+            return
+        QCoreApplication.quit()
+
+    def mousePressEvent(self, event) -> None:
+        """Перетаскивание окна за кастомный заголовок."""
+        if event.button() == Qt.LeftButton and self._title_bar is not None:
+            if self._title_bar.geometry().contains(event.pos()):
+                self._drag_active = True
+                self._drag_pos = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
+                event.accept()
+                return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event) -> None:
+        if self._drag_active and self._drag_pos is not None:
+            self.move(event.globalPosition().toPoint() - self._drag_pos)
+            event.accept()
+            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event) -> None:
+        if event.button() == Qt.LeftButton:
+            self._drag_active = False
+        super().mouseReleaseEvent(event)
 
     def dropEvent(self, event) -> None:
         """Обрабатываем drop на окне и перенаправляем файлы в список карточек."""
@@ -468,12 +879,30 @@ class MainWindow(QMainWindow):
             self.add_images_from_files(file_paths)
         event.acceptProposedAction()
 
+    def set_status_state(self, text: str) -> None:
+        """Обновить текст состояния в нижней строке статуса."""
+        if hasattr(self, "status_state_label") and self.status_state_label:
+            self.status_state_label.setText(text)
+
+    def _update_status_state(self) -> None:
+        """Вычислить и установить состояние: что работает, что нет."""
+        parts = []
+        if self.list_widget.count() == 0:
+            parts.append("нет карточек")
+        else:
+            parts.append(f"карточки: {self.list_widget.count()}")
+        if self.video_list.count() == 0:
+            parts.append("нет видео")
+        else:
+            parts.append(f"видео: {self.video_list.count()}")
+        self.set_status_state("  •  ".join(parts) if parts else "Готов")
+
     def load_video_list(self) -> None:
         """Загрузка списка видео из папки Assets/video."""
         video_dir = BASE_DIR / "Assets" / "video"
         self.video_list.clear()
         if not video_dir.exists():
-            # Комментарий: если папки пока нет, просто не показываем элементы
+            self._update_status_state()
             return
 
         for p in sorted(video_dir.iterdir()):
@@ -482,231 +911,281 @@ class MainWindow(QMainWindow):
                 item.setData(Qt.UserRole, str(p.resolve()))
                 self.video_list.addItem(item)
 
-        # Если есть элементы и глобальное видео ещё не выбрано — выбираем первый
-        if self.video_list.count() > 0 and not self.global_video_path:
-            self.video_list.setCurrentRow(0)
+        if self.video_list.count() > 0:
+            if self.global_video_path:
+                path_str = str(Path(self.global_video_path).resolve())
+                for i in range(self.video_list.count()):
+                    if self.video_list.item(i).data(Qt.UserRole) == path_str:
+                        self.video_list.setCurrentRow(i)
+                        break
+                else:
+                    self.video_list.setCurrentRow(0)
+            else:
+                self.video_list.setCurrentRow(0)
+        self._update_status_state()
 
     def _build_ui(self) -> None:
-        """Построение интерфейса в стиле Adobe: панели, иконки Phosphor, тёмная тема."""
+        """Современный интерфейс: кастомный заголовок, удобные панели, акцент на экспорт."""
         central = QWidget(self)
         self.setCentralWidget(central)
 
-        main_layout = QHBoxLayout(central)
-        main_layout.setContentsMargins(12, 12, 12, 12)
-        main_layout.setSpacing(12)
+        root_layout = QVBoxLayout(central)
+        root_layout.setContentsMargins(10, 10, 10, 10)
+        root_layout.setSpacing(8)
 
-        # Левая панель — карточки
+        main_container = QFrame()
+        main_container.setObjectName("mainContainer")
+        main_layout = QHBoxLayout(main_container)
+        main_layout.setContentsMargins(0, 0, 0, 0)
+        main_layout.setSpacing(10)
+        root_layout.addWidget(main_container, 1)
+
+        # —— Нижняя строка: статусы и информация ——
+        status_bar = QFrame()
+        status_bar.setObjectName("statusBar")
+        status_layout = QHBoxLayout(status_bar)
+        status_layout.setContentsMargins(10, 4, 10, 4)
+        status_layout.setSpacing(12)
+        self.status_name_label = QLabel(f"Wbo BAMP  |  v{APP_VERSION}")
+        self.status_name_label.setObjectName("statusName")
+        status_layout.addWidget(self.status_name_label)
+        status_layout.addStretch(1)
+        self.status_state_label = QLabel("Готов")
+        self.status_state_label.setObjectName("statusState")
+        status_layout.addWidget(self.status_state_label)
+        root_layout.addWidget(status_bar)
+
+        # —— 1. Карточки ——
         self.left_panel = QFrame()
         self.left_panel.setObjectName("panel")
         left_layout = QVBoxLayout(self.left_panel)
-        left_layout.setSpacing(10)
+        left_layout.setSpacing(6)
 
-        header_layout = QHBoxLayout()
-        section_cards = QLabel("Карточки")
-        section_cards.setObjectName("sectionLabel")
-        header_layout.addWidget(section_cards)
+        row1 = QHBoxLayout()
+        step1 = QLabel("1. Карточки")
+        step1.setObjectName("sectionLabel")
+        row1.addWidget(step1)
+        row1.addStretch(1)
+        left_layout.addLayout(row1)
+        hint1 = QLabel("Добавьте изображения или перетащите в окно")
+        hint1.setObjectName("stepHint")
+        left_layout.addWidget(hint1)
 
-        self.cards_view_mode = QComboBox()
-        self.cards_view_mode.addItems(["Сетка превью", "Список"])
-        self.cards_view_mode.currentIndexChanged.connect(self.on_cards_view_mode_changed)
-        header_layout.addWidget(self.cards_view_mode)
-
-        header_layout.addStretch(1)
-
-        # Компактный тулбар с иконками: загрузка / экспорт / удаление
-        btn_load_images = QPushButton()
-        btn_load_images.setToolTip("Загрузить изображения...")
-        btn_load_images.setIcon(load_phosphor_icon("folder-open", 18))
-        btn_load_images.setIconSize(QSize(18, 18))
+        toolbar = QHBoxLayout()
+        toolbar.setSpacing(4)
+        btn_load_images = QPushButton(" Загрузить ")
+        btn_load_images.setToolTip("Загрузить изображения из папки (Ctrl+O)")
+        btn_load_images.setIcon(load_phosphor_icon("folder-open", 14))
+        btn_load_images.setIconSize(QSize(14, 14))
         btn_load_images.clicked.connect(self.on_load_images_clicked)
-        header_layout.addWidget(btn_load_images)
-
-        btn_export_selected = QPushButton()
-        btn_export_selected.setToolTip("Экспортировать выбранные карточки")
-        btn_export_selected.setIcon(load_phosphor_icon("export", 18))
-        btn_export_selected.setIconSize(QSize(18, 18))
-        btn_export_selected.clicked.connect(self.on_export_selected_clicked)
-        header_layout.addWidget(btn_export_selected)
-
+        toolbar.addWidget(btn_load_images)
+        self.btn_duplicate = QPushButton()
+        self.btn_duplicate.setToolTip("Дублировать выбранные карточки (Ctrl+J)")
+        self.btn_duplicate.setIcon(load_phosphor_icon("Files", 14))
+        self.btn_duplicate.setIconSize(QSize(14, 14))
+        self.btn_duplicate.setProperty("class", "iconOnly accent")
+        self.btn_duplicate.clicked.connect(self.on_duplicate_selected_clicked)
+        self.btn_duplicate.setEnabled(False)
+        toolbar.addWidget(self.btn_duplicate)
         self.btn_delete_selected = QPushButton()
-        self.btn_delete_selected.setToolTip("Удалить выбранные карточки")
-        self.btn_delete_selected.setIcon(load_phosphor_icon("trash", 18))
-        self.btn_delete_selected.setIconSize(QSize(18, 18))
+        self.btn_delete_selected.setToolTip("Удалить выбранные (Delete)")
+        self.btn_delete_selected.setIcon(load_phosphor_icon("trash", 14))
+        self.btn_delete_selected.setIconSize(QSize(14, 14))
+        self.btn_delete_selected.setProperty("class", "iconOnly danger")
         self.btn_delete_selected.clicked.connect(self.on_delete_selected_clicked)
-        self.btn_delete_selected.setVisible(False)
-        header_layout.addWidget(self.btn_delete_selected)
-
-        left_layout.addLayout(header_layout)
+        self.btn_delete_selected.setEnabled(False)
+        toolbar.addWidget(self.btn_delete_selected)
+        toolbar.addStretch(1)
+        left_layout.addLayout(toolbar)
 
         self.list_widget = ImageListWidget(self)
         self.list_widget.setSelectionMode(QListWidget.ExtendedSelection)
+        self.list_widget.setProperty("listMode", False)
         self.list_widget.setViewMode(QListWidget.IconMode)
-        self.list_widget.setIconSize(QSize(96, 96))
+        # Сетка: крупные превью с нормальным расстоянием между карточками
+        self.list_widget.setIconSize(QSize(88, 88))
+        self.list_widget.setGridSize(QSize(100, 128))
         self.list_widget.setResizeMode(QListWidget.Adjust)
         self.list_widget.setMovement(QListWidget.Static)
         left_layout.addWidget(self.list_widget, 1)
 
         main_layout.addWidget(self.left_panel, 2)
 
-        # Центральная колонка — большое превью карточки
+        # —— 2. Превью ——
         self.center_panel = QFrame()
         self.center_panel.setObjectName("panel")
         center_layout = QVBoxLayout(self.center_panel)
-        center_layout.setSpacing(8)
+        center_layout.setSpacing(6)
+        hint2 = QLabel("Карточка + видео → наложение в реальном времени")
+        hint2.setObjectName("stepHint")
+        center_layout.addWidget(hint2)
 
-        # Заголовок + режим предпросмотра (разрешение)
-        header_preview = QHBoxLayout()
-        lbl_preview_sec = QLabel("Превью карточки")
-        lbl_preview_sec.setObjectName("sectionLabel")
-        header_preview.addWidget(lbl_preview_sec)
-        header_preview.addStretch(1)
-
-        self.preview_mode_combo = QComboBox()
-        self.preview_mode_combo.addItem("540x720 (быстрый просмотр)", (540, 720))
-        self.preview_mode_combo.addItem("720x960 (стандартный просмотр)", (720, 960))
-        self.preview_mode_combo.addItem("900x1200 (исходный материал)", (900, 1200))
-        self.preview_mode_combo.setCurrentIndex(0)  # по умолчанию быстрый просмотр
-        self.preview_mode_combo.currentIndexChanged.connect(self._on_preview_mode_changed)
-        header_preview.addWidget(self.preview_mode_combo)
-
-        center_layout.addLayout(header_preview)
         self.lbl_image_preview = QLabel()
-        # Превью должно масштабироваться при разворачивании окна, поэтому
-        # задаём минимальный размер и разрешаем растягивание.
-        self.lbl_image_preview.setMinimumSize(300, 400)
+        self.lbl_image_preview.setMinimumSize(140, 186)
         self.lbl_image_preview.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        self.lbl_image_preview.setStyleSheet("background-color: #1e1e1e; border: 1px solid #3d3d3d; border-radius: 4px;")
+        self.lbl_image_preview.setStyleSheet(
+            "background: transparent; border: 1px solid #30363d; border-radius: 8px;"
+        )
         self.lbl_image_preview.setAlignment(Qt.AlignCenter)
         center_layout.addWidget(self.lbl_image_preview)
-        center_layout.addSpacing(4)
+
+        # Таймлайн превью: ползунок + одна кнопка Play/Pause (без надписей)
+        self._preview_slider_syncing = False
+        preview_controls = QHBoxLayout()
+        preview_controls.setSpacing(8)
         self.btn_preview_play_pause = QPushButton()
-        self.btn_preview_play_pause.setToolTip("Пауза / пуск предпросмотра")
-        # Иконки: pause.svg для паузы, video-camera.svg для воспроизведения
+        self.btn_preview_play_pause.setToolTip("Пауза / воспроизведение (Space)")
         self.btn_preview_play_pause.setIcon(load_phosphor_icon("pause", 18))
         self.btn_preview_play_pause.setIconSize(QSize(18, 18))
-        self.btn_preview_play_pause.setFixedSize(32, 28)
+        self.btn_preview_play_pause.setProperty("class", "iconOnly")
         self.btn_preview_play_pause.clicked.connect(self._toggle_preview_play_pause)
-        center_layout.addWidget(self.btn_preview_play_pause, alignment=Qt.AlignHCenter)
+        self.slider_preview_timeline = QSlider(Qt.Horizontal)
+        self.slider_preview_timeline.setObjectName("previewTimeline")
+        self.slider_preview_timeline.setMinimum(0)
+        self.slider_preview_timeline.setMaximum(100)
+        self.slider_preview_timeline.setValue(0)
+        self.slider_preview_timeline.setMinimumHeight(28)
+        self.slider_preview_timeline.valueChanged.connect(self._on_preview_timeline_slider_changed)
+        preview_controls.addWidget(self.btn_preview_play_pause)
+        preview_controls.addWidget(self.slider_preview_timeline, 1)
+        center_layout.addLayout(preview_controls)
         center_layout.addStretch(1)
         main_layout.addWidget(self.center_panel, 3)
 
-        # Правая часть — скроллируемая область с настройками
+        # —— 3. Видео и настройки ——
         self.right_scroll = QScrollArea()
         self.right_scroll.setWidgetResizable(True)
         self.right_scroll.setFrameShape(QFrame.Shape.NoFrame)
         self.right_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         right_content = QWidget()
         right_layout = QVBoxLayout(right_content)
-        right_layout.setSpacing(12)
+        right_layout.setSpacing(6)
 
-        # Панель видео
+        step3 = QLabel("Видео и настройки")
+        step3.setObjectName("sectionLabel")
+        right_layout.addWidget(step3)
+
         video_panel = QFrame()
         video_panel.setObjectName("panel")
         video_pl = QVBoxLayout(video_panel)
+        video_pl.setSpacing(6)
 
-        # Заголовок + кнопка обновления в правом углу
         video_header = QHBoxLayout()
-        lbl_video = QLabel("Список видео (Assets/video)")
-        lbl_video.setObjectName("sectionLabel")
+        lbl_video = QLabel("Ролики (Assets/video)")
+        lbl_video.setObjectName("stepHint")
         video_header.addWidget(lbl_video)
         video_header.addStretch(1)
         btn_refresh_videos = QPushButton()
-        btn_refresh_videos.setToolTip("Обновить список видео")
-        btn_refresh_videos.setIcon(load_phosphor_icon("arrows-clock", 18))
-        btn_refresh_videos.setIconSize(QSize(18, 18))
+        btn_refresh_videos.setToolTip("Обновить список")
+        btn_refresh_videos.setIcon(load_phosphor_icon("arrows-clock", 12))
+        btn_refresh_videos.setIconSize(QSize(12, 12))
+        btn_refresh_videos.setProperty("class", "iconOnly accent")
         btn_refresh_videos.clicked.connect(self.on_refresh_videos_clicked)
         video_header.addWidget(btn_refresh_videos)
         video_pl.addLayout(video_header)
 
+        # Перенесён выбор разрешения предпросмотра рядом с видео
+        res_row = QHBoxLayout()
+        res_row.addWidget(QLabel("Разрешение предпросмотра:"))
+        res_row.addStretch(1)
+        self.preview_mode_combo = QComboBox()
+        self.preview_mode_combo.addItem("200×266", (200, 266))
+        self.preview_mode_combo.addItem("260×346", (260, 346))
+        self.preview_mode_combo.addItem("320×426", (320, 426))
+        self.preview_mode_combo.setCurrentIndex(2)  # по умолчанию 320×426
+        self.preview_mode_combo.currentIndexChanged.connect(self._on_preview_mode_changed)
+        res_row.addWidget(self.preview_mode_combo)
+        video_pl.addLayout(res_row)
         self.video_list = QListWidget()
-        self.video_list.setMaximumHeight(140)
+        self.video_list.setMaximumHeight(100)
         self.video_list.currentItemChanged.connect(self.on_video_selected)
         video_pl.addWidget(self.video_list)
         self.chk_single_video = QCheckBox("Один ролик для всех карточек")
+        self.chk_single_video.setObjectName("singleVideoCheckbox")
         self.chk_single_video.setChecked(True)
         video_pl.addWidget(self.chk_single_video)
-        video_pl.addWidget(QLabel("Общее видео:"))
         self.lbl_global_video = QLabel("Не выбрано")
+        self.lbl_global_video.setObjectName("stepHint")
         self.lbl_global_video.setWordWrap(True)
         video_pl.addWidget(self.lbl_global_video)
         right_layout.addWidget(video_panel)
 
-        # Панель настроек карточки
         card_panel = QFrame()
         card_panel.setObjectName("panel")
         card_pl = QVBoxLayout(card_panel)
-        card_pl.addWidget(QLabel("Выбранная карточка"))
-        self.lbl_selected_image = QLabel("Карточка не выбрана")
+        card_pl.setSpacing(4)
+        card_pl.addWidget(QLabel("Текущая карточка"))
+        self.lbl_selected_image = QLabel("—")
+        self.lbl_selected_image.setObjectName("stepHint")
         self.lbl_selected_image.setWordWrap(True)
         card_pl.addWidget(self.lbl_selected_image)
         self.lbl_selected_video = QLabel("Видео: общее")
+        self.lbl_selected_video.setObjectName("stepHint")
         self.lbl_selected_video.setWordWrap(True)
         card_pl.addWidget(self.lbl_selected_video)
         right_layout.addWidget(card_panel)
 
-        # Панель кривой
         curve_panel = QFrame()
         curve_panel.setObjectName("panel")
         curve_pl = QVBoxLayout(curve_panel)
-        curve_sec = QLabel("Кривая (тени / средние / света)")
+        curve_pl.setSpacing(4)
+        curve_sec = QLabel("Кривая: тени / средние / света")
         curve_sec.setObjectName("sectionLabel")
         curve_pl.addWidget(curve_sec)
-
-        # Верхний ряд: график слева, ползунки справа — как в профессиональных панелях
         curve_top = QHBoxLayout()
-        self.lbl_curve_preview = QLabel()
-        self.lbl_curve_preview.setFixedSize(200, 200)
-        self.lbl_curve_preview.setStyleSheet("background-color: #1e1e1e; border: 1px solid #3d3d3d; border-radius: 4px;")
-        self.lbl_curve_preview.setAlignment(Qt.AlignCenter)
+        self.lbl_curve_preview = CurvePreviewLabel(self, 128)
         curve_top.addWidget(self.lbl_curve_preview)
-
         sliders_col = QVBoxLayout()
+        sliders_col.setSpacing(2)
         self.lbl_curve_shadows = QLabel("Тени: 64")
         sliders_col.addWidget(self.lbl_curve_shadows)
         self.slider_curve_shadows = QSlider(Qt.Horizontal)
+        self.slider_curve_shadows.setObjectName("curveSlider")
+        self.slider_curve_shadows.setMaximumHeight(20)
         self.slider_curve_shadows.setMinimum(0)
         self.slider_curve_shadows.setMaximum(255)
         self.slider_curve_shadows.setValue(64)
         self.slider_curve_shadows.valueChanged.connect(self.on_curve_shadows_changed)
         sliders_col.addWidget(self.slider_curve_shadows)
-
         self.lbl_curve_midtones = QLabel("Средние: 128")
         sliders_col.addWidget(self.lbl_curve_midtones)
         self.slider_curve_midtones = QSlider(Qt.Horizontal)
+        self.slider_curve_midtones.setObjectName("curveSlider")
+        self.slider_curve_midtones.setMaximumHeight(20)
         self.slider_curve_midtones.setMinimum(0)
         self.slider_curve_midtones.setMaximum(255)
         self.slider_curve_midtones.setValue(128)
         self.slider_curve_midtones.valueChanged.connect(self.on_curve_midtones_changed)
         sliders_col.addWidget(self.slider_curve_midtones)
-
         self.lbl_curve_highlights = QLabel("Света: 192")
         sliders_col.addWidget(self.lbl_curve_highlights)
         self.slider_curve_highlights = QSlider(Qt.Horizontal)
+        self.slider_curve_highlights.setObjectName("curveSlider")
+        self.slider_curve_highlights.setMaximumHeight(20)
         self.slider_curve_highlights.setMinimum(0)
         self.slider_curve_highlights.setMaximum(255)
         self.slider_curve_highlights.setValue(192)
         self.slider_curve_highlights.valueChanged.connect(self.on_curve_highlights_changed)
         sliders_col.addWidget(self.slider_curve_highlights)
-
         curve_top.addLayout(sliders_col, 1)
         curve_pl.addLayout(curve_top)
-
-        # Кнопка предпросмотра — иконка без текста, с подсказкой
-        btn_preview = QPushButton()
-        btn_preview.setToolTip("Предпросмотр выбранной карточки")
-        btn_preview.setIcon(load_phosphor_icon("image", 18))
-        btn_preview.setIconSize(QSize(18, 18))
-        btn_preview.clicked.connect(self.on_preview_clicked)
-        curve_pl.addWidget(btn_preview, alignment=Qt.AlignRight)
         right_layout.addWidget(curve_panel)
 
-        right_layout.addStretch(1)
+        self.btn_export_main = QPushButton(" Экспорт ")
+        self.btn_export_main.setProperty("class", "primary")
+        self.btn_export_main.setToolTip("Экспорт выбранных или всех карточек в MP4 (Ctrl+Shift+E)")
+        self.btn_export_main.setIcon(load_phosphor_icon("export", 16))
+        self.btn_export_main.setIconSize(QSize(16, 16))
+        self.btn_export_main.clicked.connect(self.on_export_clicked)
+        right_layout.addWidget(self.btn_export_main)
 
+        right_layout.addStretch(1)
         self.right_scroll.setWidget(right_content)
         main_layout.addWidget(self.right_scroll, 2)
 
         self.list_widget.currentRowChanged.connect(self.on_current_item_changed)
         self.list_widget.itemSelectionChanged.connect(self.on_selection_changed)
+        self.on_selection_changed()
 
     def _setup_actions_and_menu(self) -> None:
         """Меню сверху и горячие клавиши."""
@@ -725,11 +1204,31 @@ class MainWindow(QMainWindow):
         self.act_view_right.triggered.connect(self._toggle_right_panel)
         view_menu.addAction(self.act_view_right)
 
+        # Подменю «Режим рендера»: качество vs скорость экспорта (без QActionGroup — совместимость)
+        export_menu = menu_bar.addMenu("Экспорт")
+        render_sub = export_menu.addMenu("Режим рендера")
+        self._render_preset_actions: list[tuple[QAction, str]] = []
+
+        def _make_render_preset_action(label: str, preset: str) -> QAction:
+            act = QAction(label, self, checkable=True)
+            act.setChecked(self.render_preset == preset)
+            act.triggered.connect(lambda checked, p=preset: self._on_render_preset_changed(p))
+            self._render_preset_actions.append((act, preset))
+            return act
+
+        render_sub.addAction(_make_render_preset_action("Высокое качество (медленный рендер)", "quality"))
+        render_sub.addAction(_make_render_preset_action("Среднее качество (быстрый рендер)", "balanced"))
+        render_sub.addAction(_make_render_preset_action("Очень быстрый рендер", "fast"))
+
         help_menu = menu_bar.addMenu("Помощь")
 
         act_about = QAction("О программе", self)
         act_about.triggered.connect(self._show_about)
         help_menu.addAction(act_about)
+
+        act_readme = QAction("Справка", self)
+        act_readme.triggered.connect(self._show_readme)
+        help_menu.addAction(act_readme)
 
         act_history = QAction("История изменений", self)
         act_history.triggered.connect(self._show_history)
@@ -739,12 +1238,17 @@ class MainWindow(QMainWindow):
         act_author.triggered.connect(self._show_author)
         help_menu.addAction(act_author)
 
-        # Горячие клавиши (основные операции)
-        QShortcut(QKeySequence("Ctrl+O"), self, activated=self.on_load_images_clicked)
-        QShortcut(QKeySequence("Ctrl+E"), self, activated=self.on_export_selected_clicked)
-        QShortcut(QKeySequence("Ctrl+Shift+E"), self, activated=self.on_export_clicked)
-        QShortcut(QKeySequence("Space"), self, activated=self._toggle_preview_play_pause)
-        QShortcut(QKeySequence("Delete"), self, activated=self.on_delete_selected_clicked)
+        # Горячие клавиши: один источник правды для регистрации и для «О программе»
+        self._hotkey_specs: list[tuple[str, object]] = [
+            ("Ctrl+O", self.on_load_images_clicked, "загрузить изображения из папки"),
+            ("Ctrl+E", self.on_export_current_clicked, "экспорт карточки, выбранной в превью"),
+            ("Ctrl+Shift+E", self.on_export_clicked, "экспорт выбранных или всех карточек в MP4"),
+            ("Ctrl+J", self.on_duplicate_selected_clicked, "дублировать выбранные карточки (с настройками)"),
+            ("Delete", self.on_delete_selected_clicked, "удалить выбранные карточки"),
+            ("Space", self._toggle_preview_play_pause, "пауза / воспроизведение превью"),
+        ]
+        for key_str, callback, _ in self._hotkey_specs:
+            QShortcut(QKeySequence(key_str), self, activated=callback)
 
     def _toggle_left_panel(self, checked: bool) -> None:
         """Скрытие/показ левой панели карточек через меню 'Вид'."""
@@ -761,6 +1265,14 @@ class MainWindow(QMainWindow):
         if hasattr(self, "right_scroll"):
             self.right_scroll.setVisible(checked)
 
+    def _on_render_preset_changed(self, preset: str) -> None:
+        """Смена режима рендера (качество / скорость). Оставляем отмеченным только выбранный пункт."""
+        self.render_preset = preset
+        self.config["render_preset"] = preset
+        save_config(self.config)
+        for act, p in getattr(self, "_render_preset_actions", []):
+            act.setChecked(p == preset)
+
     def _on_preview_mode_changed(self, index: int) -> None:
         """Изменение режима предпросмотра (разрешения превью)."""
         data = self.preview_mode_combo.itemData(index)
@@ -773,32 +1285,80 @@ class MainWindow(QMainWindow):
 
     def _show_about(self) -> None:
         """Диалог 'О программе' с краткой инструкцией и горячими клавишами."""
-        # При открытии подменю проигрываем собственный клик вместо системного звука
         SoundPlayer.play(SOUND_CLICK)
+        hotkeys_lines = [f"  {key:<16} — {desc}" for key, _, desc in self._hotkey_specs]
+        hotkeys_text = "\n".join(hotkeys_lines)
         text = (
-            "WBO Animation — генератор видео-карточек.\n\n"
+            "Wbo BAMP — генератор видео-карточек.\n\n"
             "Основной сценарий работы:\n"
             "1. Слева загрузите изображения карточек (иконка папки).\n"
-            "2. Выберите видео в блоке 'Список видео' справа.\n"
+            "2. Выберите видео в блоке «Список видео» справа.\n"
             "3. Настройте кривую (тени / средние / света).\n"
             "4. Для предпросмотра используйте большую область в центре — видео\n"
-            "   накладывается в реальном времени в режиме 'Экран'.\n"
+            "   накладывается в реальном времени в режиме «Экран».\n"
             "5. Экспортируйте карточки в MP4 кнопкой внизу справа.\n\n"
             "Горячие клавиши:\n"
-            "  Ctrl+O        — загрузить изображения\n"
-            "  Ctrl+E        — экспортировать только выбранные карточки\n"
-            "  Ctrl+Shift+E  — экспортировать все карточки в MP4\n"
-            "  Delete        — удалить выбранные карточки\n"
-            "  Space         — пауза / пуск предпросмотра\n\n"
+            f"{hotkeys_text}\n\n"
             "Поддерживаются форматы изображений: JPG, PNG, WEBP.\n"
             "Видео — MP4 (кодеки H.264, H.265, AV1, если установлены в системе)."
         )
-        box = QMessageBox(self)
-        box.setWindowTitle("О программе")
-        box.setText(text)
-        box.setIcon(QMessageBox.NoIcon)
-        box.setStandardButtons(QMessageBox.Ok)
-        box.exec()
+        dlg = QDialog(self)
+        dlg.setWindowFlags(Qt.WindowType.Dialog | Qt.WindowType.FramelessWindowHint)
+        dlg.setStyleSheet(HELP_DIALOG_STYLE)
+        layout = QVBoxLayout(dlg)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        layout.addWidget(DialogTitleBar(dlg, "О программе"))
+        content = QWidget()
+        content_ly = QVBoxLayout(content)
+        content_ly.setContentsMargins(12, 8, 12, 12)
+        lbl = QLabel(text)
+        lbl.setWordWrap(True)
+        content_ly.addWidget(lbl)
+        btn_ok = QPushButton("ОК")
+        btn_ok.clicked.connect(dlg.accept)
+        content_ly.addWidget(btn_ok, alignment=Qt.AlignRight)
+        layout.addWidget(content)
+        QShortcut(QKeySequence("Escape"), dlg, dlg.reject)
+        dlg.resize(420, 380)
+        SoundPlayer.play(SOUND_DIALOG)
+        dlg.exec()
+
+    def _show_readme(self) -> None:
+        """Показать содержимое README.md в диалоге (без сырой markdown-разметки)."""
+        SoundPlayer.play(SOUND_CLICK)
+        readme_path = BASE_DIR / "README.md"
+        try:
+            raw = readme_path.read_text(encoding="utf-8") if readme_path.exists() else "Файл README не найден."
+            text = _format_readme_for_display(raw)
+        except Exception:
+            text = "Не удалось прочитать README."
+        dlg = QDialog(self)
+        dlg.setWindowFlags(Qt.WindowType.Dialog | Qt.WindowType.FramelessWindowHint)
+        dlg.setStyleSheet(HELP_DIALOG_STYLE)
+        layout = QVBoxLayout(dlg)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        layout.addWidget(DialogTitleBar(dlg, "Справка"))
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        lbl = QLabel(text)
+        lbl.setWordWrap(True)
+        lbl.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        lbl.setMinimumWidth(420)
+        scroll.setWidget(lbl)
+        layout.addWidget(scroll, 1)
+        btn_ok = QPushButton("ОК")
+        btn_ok.clicked.connect(dlg.accept)
+        btn_row = QHBoxLayout()
+        btn_row.addStretch(1)
+        btn_row.addWidget(btn_ok)
+        layout.addLayout(btn_row)
+        QShortcut(QKeySequence("Escape"), dlg, dlg.reject)
+        dlg.resize(480, 420)
+        SoundPlayer.play(SOUND_DIALOG)
+        dlg.exec()
 
     def _show_history(self) -> None:
         """Диалог с краткой историей изменений интерфейса и функционала."""
@@ -813,12 +1373,27 @@ class MainWindow(QMainWindow):
             "• Правая колонка разделена на панели: видео, выбранная карточка, кривая, экспорт.\n"
             "• Добавлена поддержка иконок из папки Assets/icons (SVG/PNG).\n"
         )
-        box = QMessageBox(self)
-        box.setWindowTitle("История изменений")
-        box.setText(text)
-        box.setIcon(QMessageBox.NoIcon)
-        box.setStandardButtons(QMessageBox.Ok)
-        box.exec()
+        dlg = QDialog(self)
+        dlg.setWindowFlags(Qt.WindowType.Dialog | Qt.WindowType.FramelessWindowHint)
+        dlg.setStyleSheet(HELP_DIALOG_STYLE)
+        layout = QVBoxLayout(dlg)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        layout.addWidget(DialogTitleBar(dlg, "История изменений"))
+        content = QWidget()
+        content_ly = QVBoxLayout(content)
+        content_ly.setContentsMargins(12, 8, 12, 12)
+        lbl = QLabel(text)
+        lbl.setWordWrap(True)
+        content_ly.addWidget(lbl)
+        btn_ok = QPushButton("ОК")
+        btn_ok.clicked.connect(dlg.accept)
+        content_ly.addWidget(btn_ok, alignment=Qt.AlignRight)
+        layout.addWidget(content)
+        QShortcut(QKeySequence("Escape"), dlg, dlg.reject)
+        dlg.resize(440, 320)
+        SoundPlayer.play(SOUND_DIALOG)
+        dlg.exec()
 
     def _show_author(self) -> None:
         """Диалог с информацией об авторе."""
@@ -848,17 +1423,24 @@ class MainWindow(QMainWindow):
 
         dlg = QDialog(self)
         dlg.setWindowTitle("Автор")
+        dlg.setWindowFlags(Qt.WindowType.Dialog | Qt.WindowType.FramelessWindowHint)
         dlg.setStyleSheet(
-            "QDialog { background-color: #1f1f1f; }"
-            "QLabel { color: #e8e8e8; font-size: 12px; }"
-            "QLabel#nameLabel { font-size: 16px; font-weight: bold; margin-bottom: 4px; }"
-            "QLabel#subtitleLabel { color: #9ca3af; font-size: 11px; margin-bottom: 8px; }"
+            HELP_DIALOG_STYLE
+            + " QWidget#authorContent { background: transparent; }"
+            " QLabel#authorName { color: #e6edf3; font-size: 15px; font-weight: 600; }"
+            " QLabel#authorSubtitle { color: #8b949e; font-size: 13px; }"
         )
         layout = QVBoxLayout(dlg)
-        layout.setContentsMargins(16, 16, 16, 16)
-        layout.setSpacing(10)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        layout.addWidget(DialogTitleBar(dlg, "Об авторе"))
+        content = QWidget()
+        content.setObjectName("authorContent")
+        layout_inner = QVBoxLayout(content)
+        layout_inner.setSpacing(12)
+        layout_inner.setContentsMargins(16, 16, 16, 16)
 
-        # Аудио-плеер с треком портфолио, останавливается при закрытии диалога
+        # Фоновый трек портфолио (без визуала)
         if SOUND_PORTFOLIO.exists():
             try:
                 player = QMediaPlayer(dlg)
@@ -866,8 +1448,6 @@ class MainWindow(QMainWindow):
                 player.setAudioOutput(audio)
                 audio.setVolume(0.35)
                 player.setSource(QUrl.fromLocalFile(str(SOUND_PORTFOLIO)))
-                # В новых версиях Qt есть свойство loops, но на всякий случай
-                # перезапускаем трек при завершении.
                 try:
                     player.setLoops(-1)
                 except Exception:
@@ -880,12 +1460,12 @@ class MainWindow(QMainWindow):
             except Exception:
                 pass
 
-        # Аватар в круге, если файл существует
+        # Аватар в круге
         avatar_path = BASE_DIR / "Assets" / "images" / "ivan.jpg"
         if avatar_path.exists():
             raw = QPixmap(str(avatar_path))
             if not raw.isNull():
-                size = 96
+                size = 80
                 raw = raw.scaled(size, size, Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation)
                 circle = QPixmap(size, size)
                 circle.fill(Qt.transparent)
@@ -898,28 +1478,39 @@ class MainWindow(QMainWindow):
                 painter.setCompositionMode(QPainter.CompositionMode_SourceIn)
                 painter.drawPixmap(0, 0, raw)
                 painter.end()
-
                 avatar_lbl = QLabel()
                 avatar_lbl.setPixmap(circle)
                 avatar_lbl.setAlignment(Qt.AlignHCenter)
-                layout.addWidget(avatar_lbl)
+                layout_inner.addWidget(avatar_lbl)
 
         name_lbl = QLabel("Радыгин Иван Олегович")
-        name_lbl.setObjectName("nameLabel")
-        name_lbl.setAlignment(Qt.AlignHCenter)
-        layout.addWidget(name_lbl)
+        name_lbl.setObjectName("authorName")
+        layout_inner.addWidget(name_lbl)
 
         subtitle_lbl = QLabel("Нейросети, вайбкодинг и проекты, которые приносят пользу")
-        subtitle_lbl.setObjectName("subtitleLabel")
-        subtitle_lbl.setAlignment(Qt.AlignHCenter)
+        subtitle_lbl.setObjectName("authorSubtitle")
         subtitle_lbl.setWordWrap(True)
-        layout.addWidget(subtitle_lbl)
+        layout_inner.addWidget(subtitle_lbl)
+
+        sep = QFrame()
+        sep.setFrameShape(QFrame.Shape.HLine)
+        sep.setStyleSheet("background: #2a3038; max-height: 1px; border: none;")
+        layout_inner.addWidget(sep)
 
         text_lbl = QLabel(full_text)
         text_lbl.setWordWrap(True)
-        layout.addWidget(text_lbl)
+        text_lbl.setStyleSheet("color: #b1b8c2; font-size: 13px;")
+        scroll = QScrollArea()
+        scroll.setWidget(text_lbl)
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        layout_inner.addWidget(scroll, 1)
 
-        dlg.resize(520, 420)
+        layout.addWidget(content)
+        QShortcut(QKeySequence("Escape"), dlg, dlg.reject)
+        dlg.resize(420, 400)
+        SoundPlayer.play(SOUND_DIALOG)
         dlg.exec()
 
     # ====================== Работа с изображениями ==========================
@@ -983,11 +1574,11 @@ class MainWindow(QMainWindow):
             self.items.append(item_data)
 
             item = QListWidgetItem(p.name)
-            # Делаем иконку-превью для карточки
+            # Иконка всегда в размере сетки (88×88), чтобы при переключении вид Сетка/Список превью было чётким
             pixmap = QPixmap(str(p.resolve()))
             if not pixmap.isNull():
                 icon_pixmap = pixmap.scaled(
-                    self.list_widget.iconSize(),
+                    QSize(88, 88),
                     Qt.KeepAspectRatio,
                     Qt.SmoothTransformation,
                 )
@@ -995,6 +1586,7 @@ class MainWindow(QMainWindow):
 
             self.list_widget.addItem(item)
 
+        self._update_status_state()
         # Если добавляли файлы из разных папок, запоминаем путь первой
         if file_paths:
             first_dir = str(Path(file_paths[0]).resolve().parent)
@@ -1053,38 +1645,56 @@ class MainWindow(QMainWindow):
         self.slider_curve_highlights.blockSignals(False)
         self._update_curve_labels_and_preview()
 
+        # Синхронизируем список видео: выделяем то видео, которое используется этой карточкой
+        self._sync_video_list_to_card(item)
+
         # Сначала загружаем превью с видео; если видео нет или не открылось — покажем исходное изображение
         video_started = self._load_preview_frames_for_current()
         if not video_started:
             self.update_image_preview(item.image_path)
 
+    def _sync_video_list_to_card(self, item: ImageItemData) -> None:
+        """Выделить в списке видео то ролик, который используется карточкой (общее или своё)."""
+        video_path = item.video_path or self.global_video_path
+        if not video_path:
+            return
+        path_str = str(Path(video_path).resolve())
+        for i in range(self.video_list.count()):
+            vi = self.video_list.item(i)
+            if vi and vi.data(Qt.UserRole) == path_str:
+                self.video_list.blockSignals(True)
+                self.video_list.setCurrentRow(i)
+                self.video_list.blockSignals(False)
+                return
+        # Если видео из другой папки — сравниваем как строки
+        for i in range(self.video_list.count()):
+            vi = self.video_list.item(i)
+            if vi and vi.data(Qt.UserRole) == video_path:
+                self.video_list.blockSignals(True)
+                self.video_list.setCurrentRow(i)
+                self.video_list.blockSignals(False)
+                return
+
     def on_selection_changed(self) -> None:
         """
         Обработка изменения выделения карточек.
 
-        Здесь мы управляем видимостью кнопки удаления.
+        Кнопка «Удалить» активна только при выборе; кнопка «Экспорт» показывает число выбранных.
         """
-        has_selection = bool(self.list_widget.selectedIndexes())
-        self.btn_delete_selected.setVisible(has_selection)
+        indexes = self.list_widget.selectedIndexes()
+        count = len(indexes)
+        has_selection = count > 0
+        self.btn_delete_selected.setEnabled(has_selection)
+        self.btn_duplicate.setEnabled(has_selection)
+        # Экспорт: без выбора — «Экспорт», 1 — «Экспорт», больше 1 — «Экспорт (N)»
+        if count <= 1:
+            self.btn_export_main.setText(" Экспорт ")
+        else:
+            self.btn_export_main.setText(f" Экспорт ({count}) ")
 
     def on_refresh_videos_clicked(self) -> None:
         """Ручное обновление списка видео из папки Assets/video."""
         self.load_video_list()
-
-    def on_cards_view_mode_changed(self, index: int) -> None:
-        """
-        Переключение вида карточек:
-        - 0: сетка превью (иконки);
-        - 1: список (строки с иконкой и именем).
-        """
-        if index == 0:
-            # Сетка превью
-            self.list_widget.setViewMode(QListWidget.IconMode)
-            self.list_widget.setIconSize(QSize(96, 96))
-        else:
-            # Список
-            self.list_widget.setViewMode(QListWidget.ListMode)
-            self.list_widget.setIconSize(QSize(32, 32))
 
     def on_video_selected(self, current: QListWidgetItem | None, _previous: QListWidgetItem | None) -> None:
         """Обработка выбора видео из списка."""
@@ -1150,14 +1760,14 @@ class MainWindow(QMainWindow):
 
     def _draw_curve_preview(self, shadows: int, midtones: int, highlights: int) -> None:
         """Отрисовка мини-графика кривой по трём точкам (тени/средние/света)."""
-        w, h = 200, 200
+        w = h = self.lbl_curve_preview._size if hasattr(self.lbl_curve_preview, "_size") else 128
         pixmap = QPixmap(w, h)
         pixmap.fill(QColor("#2a2a2a"))
         painter = QPainter(pixmap)
         painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
 
         # Сетка и оси: вход по X, выход по Y (0 внизу)
-        margin = 20
+        margin = self.lbl_curve_preview._margin if hasattr(self.lbl_curve_preview, "_margin") else 14
         graph_w = w - 2 * margin
         graph_h = h - 2 * margin
         painter.setPen(QPen(QColor("#555"), 1))
@@ -1171,11 +1781,10 @@ class MainWindow(QMainWindow):
         pts = []
         for x_in in range(256):
             y_out = int(lut[x_in])
-            # x: 0..255 -> margin .. margin+graph_w; y: 0..255 -> margin+graph_h .. margin
             px = margin + (x_in / 255.0) * graph_w
             py = margin + graph_h - (y_out / 255.0) * graph_h
             pts.append((px, py))
-        painter.setPen(QPen(QColor("#0cf"), 2))
+        painter.setPen(QPen(QColor("#0cf"), 1))
         for i in range(len(pts) - 1):
             painter.drawLine(int(pts[i][0]), int(pts[i][1]), int(pts[i + 1][0]), int(pts[i + 1][1]))
 
@@ -1185,10 +1794,23 @@ class MainWindow(QMainWindow):
             py = margin + graph_h - (y_out / 255.0) * graph_h
             painter.setPen(QPen(QColor("#fff"), 1))
             painter.setBrush(QColor("#0cf"))
-            painter.drawEllipse(int(px - 4), int(py - 4), 8, 8)
+            painter.drawEllipse(int(px - 2), int(py - 2), 4, 4)
 
         painter.end()
         self.lbl_curve_preview.setPixmap(pixmap)
+
+    def _on_curve_preview_clicked(self, x_in: int, y_out: int) -> None:
+        """Реакция на клик/перетаскивание по графику кривой: обновляем ближайшую точку управления."""
+        points = [(64, 0), (128, 1), (192, 2)]
+        nearest = min(points, key=lambda p: abs(p[0] - x_in))
+        idx = nearest[1]
+        value = max(0, min(255, y_out))
+        if idx == 0:
+            self.slider_curve_shadows.setValue(value)
+        elif idx == 1:
+            self.slider_curve_midtones.setValue(value)
+        else:
+            self.slider_curve_highlights.setValue(value)
 
     def _stop_preview_video(self) -> None:
         """Остановка таймера и освобождение видеопотока превью."""
@@ -1196,6 +1818,9 @@ class MainWindow(QMainWindow):
         if self.preview_cap is not None:
             self.preview_cap.release()
             self.preview_cap = None
+        self.slider_preview_timeline.setMaximum(100)
+        self.slider_preview_timeline.setValue(0)
+        self.slider_preview_timeline.setEnabled(False)
 
     def _load_preview_frames_for_current(self) -> bool:
         """Подготовка превью: загрузка базового кадра и открытие видео для зацикленного воспроизведения. Возвращает True, если видео превью запущено."""
@@ -1250,12 +1875,18 @@ class MainWindow(QMainWindow):
         interval_ms = max(20, int(1000.0 / fps))
         self._preview_timer.setInterval(interval_ms)
 
+        total_frames = int(self.preview_cap.get(cv2.CAP_PROP_FRAME_COUNT)) or 1
+        self.preview_total_frames = max(1, total_frames)
+        self._preview_slider_syncing = True
+        self.slider_preview_timeline.setMaximum(self.preview_total_frames)
+        self.slider_preview_timeline.setValue(0)
+        self._preview_slider_syncing = False
+        self.slider_preview_timeline.setEnabled(True)
         if self.preview_playing:
             self._preview_timer.start()
-        # Без текста, только иконки: pause.svg и video-camera.svg
-        self.btn_preview_play_pause.setIcon(
-            load_phosphor_icon("pause" if self.preview_playing else "video-camera", 18)
-        )
+            self.btn_preview_play_pause.setIcon(load_phosphor_icon("pause", 18))
+        else:
+            self.btn_preview_play_pause.setIcon(load_phosphor_icon("video-camera", 18))
         self._on_preview_tick()
         return True
 
@@ -1307,9 +1938,22 @@ class MainWindow(QMainWindow):
             self.lbl_image_preview.setText("")
         except Exception:
             pass
+        # Синхронизация ползунка таймлайна с текущим кадром (без рекурсии в valueChanged)
+        if not self._preview_slider_syncing and self.preview_cap is not None:
+            cur = int(self.preview_cap.get(cv2.CAP_PROP_POS_FRAMES))
+            self._preview_slider_syncing = True
+            self.slider_preview_timeline.setValue(min(cur, self.slider_preview_timeline.maximum()))
+            self._preview_slider_syncing = False
+
+    def _on_preview_timeline_slider_changed(self, value: int) -> None:
+        """Перемотка превью по таймлайну (перетаскивание ползунка)."""
+        if self._preview_slider_syncing or self.preview_cap is None or not self.preview_cap.isOpened():
+            return
+        self.preview_cap.set(cv2.CAP_PROP_POS_FRAMES, value)
+        self._on_preview_tick()
 
     def _toggle_preview_play_pause(self) -> None:
-        """Переключение пауза/пуск зацикленного превью видео."""
+        """Переключение пауза/пуск зацикленного превью видео (горячая клавиша Space)."""
         self.preview_playing = not self.preview_playing
         if self.preview_playing:
             self._preview_timer.start()
@@ -1381,6 +2025,12 @@ class MainWindow(QMainWindow):
             preview_path = tmp_dir / f"{img_name}_preview.mp4"
 
             # Рендерим короткий ролик (например, до 3 секунд)
+            try:
+                w_str, h_str = self.export_size_str.lower().split("x")
+                export_size = (int(w_str), int(h_str))
+            except Exception:
+                export_size = (900, 1200)
+
             render_card_video(
                 image_path=item.image_path,
                 video_path=video_path,
@@ -1389,6 +2039,10 @@ class MainWindow(QMainWindow):
                 curve_highlights=item.curve_highlights,
                 output_path=str(preview_path),
                 max_duration=3.0,
+                render_preset=self.render_preset,
+                export_size=export_size,
+                export_fps=float(self.export_fps),
+                export_codec=self.export_codec,
             )
 
             # Открываем ролик стандартным плеером Windows
@@ -1421,6 +2075,23 @@ class MainWindow(QMainWindow):
                 f"Не удалось открыть видео:\n{e}",
             )
 
+    def on_export_current_clicked(self) -> None:
+        """Экспорт только карточки, которая сейчас выбрана в превью (Ctrl+E)."""
+        item = self.get_current_item()
+        if not item:
+            QMessageBox.information(
+                self,
+                "Нет карточки",
+                "Выберите карточку в списке слева (та, что отображается в превью).",
+            )
+            return
+        current_row = self.list_widget.currentRow()
+        if current_row < 0:
+            return
+        self.list_widget.clearSelection()
+        self.list_widget.item(current_row).setSelected(True)
+        self.on_export_clicked()
+
     def on_export_selected_clicked(self) -> None:
         """Явный экспорт только выбранных карточек."""
         if not self.list_widget.selectedIndexes():
@@ -1430,8 +2101,6 @@ class MainWindow(QMainWindow):
                 "Сначала выделите одну или несколько карточек слева.",
             )
             return
-        # Просто переиспользуем общий обработчик экспорта,
-        # который уже учитывает текущее выделение.
         self.on_export_clicked()
 
     def on_delete_selected_clicked(self) -> None:
@@ -1472,6 +2141,46 @@ class MainWindow(QMainWindow):
             self.update_image_preview(None)
         # После удаления, если выделения нет — прячем кнопку удаления
         self.on_selection_changed()
+        self._update_status_state()
+
+    def on_duplicate_selected_clicked(self) -> None:
+        """Дублирование выбранных карточек с сохранением настроек (видео, кривая)."""
+        selected_rows = sorted({idx.row() for idx in self.list_widget.selectedIndexes()})
+        if not selected_rows:
+            QMessageBox.information(
+                self,
+                "Нет выбранных карточек",
+                "Выберите одну или несколько карточек для дублирования.",
+            )
+            return
+        start_count = len(self.items)
+        for row in selected_rows:
+            if row < 0 or row >= len(self.items):
+                continue
+            orig = self.items[row]
+            dup = ImageItemData(orig.image_path)
+            dup.video_path = orig.video_path
+            dup.curve_shadows = orig.curve_shadows
+            dup.curve_midtones = orig.curve_midtones
+            dup.curve_highlights = orig.curve_highlights
+            self.items.append(dup)
+            list_item = QListWidgetItem(Path(dup.image_path).name)
+            pixmap = QPixmap(dup.image_path)
+            if not pixmap.isNull():
+                # Иконка всегда 88×88, чтобы при переключении в вид «Сетка» превью не было размытым
+                icon_pixmap = pixmap.scaled(
+                    QSize(88, 88),
+                    Qt.KeepAspectRatio,
+                    Qt.SmoothTransformation,
+                )
+                list_item.setIcon(icon_pixmap)
+            self.list_widget.addItem(list_item)
+        # Выделяем добавленные копии
+        self.list_widget.clearSelection()
+        for i in range(start_count, len(self.items)):
+            self.list_widget.item(i).setSelected(True)
+        self.on_selection_changed()
+        self._update_status_state()
 
     def _get_items_to_export(self) -> list[ImageItemData]:
         """
@@ -1526,7 +2235,66 @@ class MainWindow(QMainWindow):
         if not export_dir:
             return
 
+        # Перед началом экспорта даём пользователю выбрать параметры рендера/кодека.
+        settings_dialog = ExportSettingsDialog(
+            self, self.export_codec, self.export_size_str, self.export_fps, self.render_preset
+        )
+        SoundPlayer.play(SOUND_DIALOG)
+        if settings_dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        self.export_codec, self.export_size_str, self.export_fps, self.render_preset = settings_dialog.get_values()
+
+        # Если выбран кодек H.264, но ffmpeg не установлен — предлагаем установить через winget.
+        if self.export_codec.lower() == "h264" and _find_ffmpeg() is None:
+            msg = QMessageBox(self)
+            msg.setIcon(QMessageBox.Information)
+            msg.setWindowTitle("FFmpeg не найден")
+            msg.setText(
+                "Для кодека H.264 нужен установленный FFmpeg.\n\n"
+                "Можно установить его командой:\n"
+                "winget install Gyan.FFmpeg\n\n"
+                "Установить FFmpeg сейчас через PowerShell?\n"
+                "После установки можно перезапустить приложение."
+            )
+            btn_install = msg.addButton("Установить через winget", QMessageBox.AcceptRole)
+            btn_continue = msg.addButton("Продолжить без H.264", QMessageBox.DestructiveRole)
+            btn_cancel = msg.addButton("Отмена", QMessageBox.RejectRole)
+            SoundPlayer.play(SOUND_DIALOG)
+            msg.exec()
+
+            clicked = msg.clickedButton()
+            if clicked == btn_install:
+                try:
+                    # Открываем PowerShell от имени обычного пользователя
+                    os.system(
+                        'start "" powershell -NoExit -Command "winget install Gyan.FFmpeg"'
+                    )
+                except Exception:
+                    pass
+
+                restart = QMessageBox.question(
+                    self,
+                    "Перезапуск приложения",
+                    "После успешной установки FFmpeg перезапустить Wbo BAMP?",
+                    QMessageBox.Yes | QMessageBox.No,
+                    QMessageBox.Yes,
+                )
+                if restart == QMessageBox.Yes:
+                    self._restart_app()
+                # Текущий экспорт не выполняем
+                return
+            elif clicked == btn_cancel:
+                return
+            else:
+                # Продолжить без H.264: принудительно переключаемся на MPEG-4
+                self.export_codec = "mpeg4"
+
         self.config["last_export_path"] = export_dir
+        self.config["export_codec"] = self.export_codec
+        self.config["export_size"] = self.export_size_str
+        self.config["export_fps"] = self.export_fps
+        self.config["render_preset"] = self.render_preset
         save_config(self.config)
 
         # Реальная обработка видео с наложением «Экран»
@@ -1535,27 +2303,35 @@ class MainWindow(QMainWindow):
         errors: list[str] = []
         success_count = 0
 
-        # Окно прогресса экспорта
+        # Окно прогресса экспорта (кастомная шапка, перетаскивание)
         progress_dialog = QDialog(self)
         progress_dialog.setWindowTitle("Экспорт видео-карточек")
         progress_dialog.setWindowModality(Qt.WindowModal)
+        progress_dialog.setWindowFlags(Qt.WindowType.Dialog | Qt.WindowType.FramelessWindowHint)
         progress_dialog.setStyleSheet(
-            "QDialog { background-color: #1f1f1f; }"
-            "QLabel { color: #e8e8e8; font-size: 12px; }"
-            "QProgressBar { background-color: #252525; border: 1px solid #3d3d3d; "
-            "border-radius: 4px; text-align: center; color: #e8e8e8; }"
-            "QProgressBar::chunk { background-color: #0d7377; border-radius: 4px; }"
-            "QPushButton { background-color: #404040; color: #e8e8e8; border: 1px solid #505050; "
+            "QDialog { background-color: #16181c; border-radius: 6px; }"
+            "QLabel { color: #e2e8f0; font-size: 12px; background: transparent; }"
+            "QProgressBar { background: transparent; border: 1px solid #334155; "
+            "border-radius: 4px; text-align: center; color: #e2e8f0; }"
+            "QProgressBar::chunk { background-color: #0ea5e9; border-radius: 4px; }"
+            "QPushButton { background: transparent; color: #e2e8f0; border: 1px solid #475569; "
             "border-radius: 4px; padding: 6px 10px; }"
-            "QPushButton:hover { background-color: #4a4a4a; border-color: #606060; }"
+            "QPushButton:hover { background: rgba(71, 85, 105, 0.5); border-color: #64748b; }"
         )
 
         vbox = QVBoxLayout(progress_dialog)
-        vbox.setContentsMargins(16, 16, 16, 16)
-        vbox.setSpacing(8)
+        vbox.setContentsMargins(0, 0, 0, 0)
+        vbox.setSpacing(0)
+
+        vbox.addWidget(DialogTitleBar(progress_dialog, "Экспорт видео-карточек"))
+
+        content_wrap = QWidget()
+        content_layout = QVBoxLayout(content_wrap)
+        content_layout.setContentsMargins(12, 8, 12, 12)
+        content_layout.setSpacing(8)
 
         lbl_current = QLabel("Подготовка экспорта...")
-        vbox.addWidget(lbl_current)
+        content_layout.addWidget(lbl_current)
 
         row_overall = QHBoxLayout()
         lbl_overall = QLabel("Общий прогресс:")
@@ -1564,7 +2340,7 @@ class MainWindow(QMainWindow):
         bar_overall.setRange(0, 100)
         bar_overall.setTextVisible(True)
         row_overall.addWidget(bar_overall)
-        vbox.addLayout(row_overall)
+        content_layout.addLayout(row_overall)
 
         row_item = QHBoxLayout()
         lbl_item = QLabel("Текущая карточка:")
@@ -1573,13 +2349,16 @@ class MainWindow(QMainWindow):
         bar_item.setRange(0, 100)
         bar_item.setTextVisible(True)
         row_item.addWidget(bar_item)
-        vbox.addLayout(row_item)
+        content_layout.addLayout(row_item)
 
         lbl_time = QLabel("Прошло: 00:00    Осталось ~--:--")
-        vbox.addWidget(lbl_time)
+        content_layout.addWidget(lbl_time)
 
         btn_cancel = QPushButton("Отмена после текущей карточки")
-        vbox.addWidget(btn_cancel)
+        content_layout.addWidget(btn_cancel)
+
+        vbox.addWidget(content_wrap)
+        QShortcut(QKeySequence("Escape"), progress_dialog, progress_dialog.reject)
 
         cancel_requested = False
 
@@ -1589,7 +2368,8 @@ class MainWindow(QMainWindow):
 
         btn_cancel.clicked.connect(on_cancel_clicked)
 
-        progress_dialog.resize(420, 200)
+        progress_dialog.resize(340, 180)
+        SoundPlayer.play(SOUND_DIALOG)
         progress_dialog.show()
 
         total_items = len(target_items)
@@ -1644,6 +2424,13 @@ class MainWindow(QMainWindow):
                     # Даем Qt возможность обновить окно
                     QApplication.processEvents()
 
+                # Преобразуем строковый размер "WxH" в числовой кортеж
+                try:
+                    w_str, h_str = self.export_size_str.lower().split("x")
+                    export_size = (int(w_str), int(h_str))
+                except Exception:
+                    export_size = (900, 1200)
+
                 render_card_video(
                     image_path=item.image_path,
                     video_path=video_path,
@@ -1651,7 +2438,12 @@ class MainWindow(QMainWindow):
                     curve_midtones=item.curve_midtones,
                     curve_highlights=item.curve_highlights,
                     output_path=out_path,
+                    max_duration=8.0,
                     progress_callback=progress_callback,
+                    render_preset=self.render_preset,
+                    export_size=export_size,
+                    export_fps=float(self.export_fps),
+                    export_codec=self.export_codec,
                 )
                 success_count += 1
             except Exception as e:
@@ -1667,35 +2459,78 @@ class MainWindow(QMainWindow):
             else:
                 SoundPlayer.play(SOUND_EXPORT_READY)
 
-        # Показываем итог
+        # Показываем итог в кастомном диалоге с шапкой
         if errors:
-            # Если были ошибки — показываем их отдельно (без системного звука Windows)
-            msg = f"Успешно экспортировано карточек: {success_count}.\n"
+            msg = f"Успешно экспортировано карточек: {success_count}.\n\n"
             msg += "Часть карточек не удалось обработать:\n\n"
             msg += "\n".join(errors)
-            msg_box = QMessageBox(self)
-            msg_box.setIcon(QMessageBox.NoIcon)
-            msg_box.setWindowTitle("Экспорт завершён с ошибками")
-            msg_box.setText(msg)
-            msg_box.addButton("ОК", QMessageBox.AcceptRole)
-            msg_box.exec()
+            result_dlg = QDialog(self)
+            result_dlg.setWindowFlags(Qt.WindowType.Dialog | Qt.WindowType.FramelessWindowHint)
+            result_dlg.setStyleSheet(
+                "QDialog { background-color: #16181c; border-radius: 6px; }"
+                "QLabel { color: #e2e8f0; font-size: 12px; background: transparent; }"
+                "QPushButton { background: transparent; color: #e2e8f0; border: 1px solid #475569; border-radius: 4px; padding: 6px 12px; }"
+                "QPushButton:hover { background: rgba(71, 85, 105, 0.5); }"
+            )
+            rly = QVBoxLayout(result_dlg)
+            rly.setContentsMargins(0, 0, 0, 0)
+            rly.setSpacing(0)
+            rly.addWidget(DialogTitleBar(result_dlg, "Экспорт завершён с ошибками"))
+            r_content = QWidget()
+            r_ly = QVBoxLayout(r_content)
+            r_ly.setContentsMargins(12, 8, 12, 12)
+            r_lbl = QLabel(msg)
+            r_lbl.setWordWrap(True)
+            r_ly.addWidget(r_lbl)
+            r_btn = QPushButton("ОК")
+            r_btn.clicked.connect(result_dlg.accept)
+            r_ly.addWidget(r_btn, alignment=Qt.AlignRight)
+            rly.addWidget(r_content)
+            QShortcut(QKeySequence("Escape"), result_dlg, result_dlg.accept)
+            result_dlg.resize(420, 280)
+            SoundPlayer.play(SOUND_DIALOG)
+            result_dlg.exec()
         else:
-            # При успешном экспорте даём выбор: просто закрыть окно или открыть папку
-            msg_box = QMessageBox(self)
-            msg_box.setIcon(QMessageBox.NoIcon)
-            msg_box.setWindowTitle("Экспорт завершён")
-            msg_box.setText(f"Успешно экспортировано карточек: {success_count}.")
-            btn_ok = msg_box.addButton("ОК", QMessageBox.AcceptRole)
-            btn_open = msg_box.addButton("Открыть папку", QMessageBox.ActionRole)
-            msg_box.setDefaultButton(btn_open)
-            msg_box.exec()
-
-            if msg_box.clickedButton() == btn_open:
+            result_dlg = QDialog(self)
+            result_dlg.setWindowFlags(Qt.WindowType.Dialog | Qt.WindowType.FramelessWindowHint)
+            result_dlg.setStyleSheet(
+                "QDialog { background-color: #16181c; border-radius: 6px; }"
+                "QLabel { color: #e2e8f0; font-size: 12px; background: transparent; }"
+                "QPushButton { background: transparent; color: #e2e8f0; border: 1px solid #475569; border-radius: 4px; padding: 6px 12px; }"
+                "QPushButton:hover { background: rgba(71, 85, 105, 0.5); }"
+                "QPushButton[class=primary] { border-color: #0d7377; color: #0d7377; }"
+                "QPushButton[class=primary]:hover { background: rgba(13, 115, 119, 0.25); border-color: #0e8a8f; color: #0e8a8f; }"
+            )
+            rly = QVBoxLayout(result_dlg)
+            rly.setContentsMargins(0, 0, 0, 0)
+            rly.setSpacing(0)
+            rly.addWidget(DialogTitleBar(result_dlg, "Экспорт завершён"))
+            r_content = QWidget()
+            r_ly = QVBoxLayout(r_content)
+            r_ly.setContentsMargins(12, 8, 12, 12)
+            r_ly.addWidget(QLabel(f"Успешно экспортировано карточек: {success_count}."))
+            r_btns = QHBoxLayout()
+            r_btns.addStretch(1)
+            btn_ok = QPushButton("ОК")
+            btn_ok.clicked.connect(result_dlg.accept)
+            btn_open = QPushButton("Открыть папку")
+            btn_open.setProperty("class", "primary")
+            def _open_and_close() -> None:
                 try:
                     os.startfile(export_dir)
                 except Exception:
-                    # Если не удалось открыть проводник — просто игнорируем
                     pass
+                result_dlg.accept()
+            btn_open.clicked.connect(_open_and_close)
+            r_btns.addWidget(btn_ok)
+            r_btns.addWidget(btn_open)
+            r_ly.addLayout(r_btns)
+            rly.addWidget(r_content)
+            QShortcut(QKeySequence("Escape"), result_dlg, result_dlg.accept)
+            result_dlg.resize(360, 140)
+            SoundPlayer.play(SOUND_DIALOG)
+            SoundPlayer.play(SOUND_EXPORT_READY)
+            result_dlg.exec()
 
 
 def screen_blend(base_frame: np.ndarray, overlay_frame: np.ndarray) -> np.ndarray:
@@ -1717,6 +2552,17 @@ def screen_blend(base_frame: np.ndarray, overlay_frame: np.ndarray) -> np.ndarra
     # Возвращаем в uint8
     result = np.clip(result * 255.0, 0, 255).astype(np.uint8)
     return result
+
+
+def _screen_blend_fast(base_frame: np.ndarray, overlay_frame: np.ndarray) -> np.ndarray:
+    """
+    Быстрое наложение «Экран» в целочисленной арифметике (для экспорта).
+    Формула: R = A + B - (A*B)//255. Визуально почти не отличается от точной.
+    """
+    a = base_frame.astype(np.uint16)
+    b = overlay_frame.astype(np.uint16)
+    r = a + b - (a * b // 255)
+    return np.minimum(r, 255).astype(np.uint8)
 
 
 def build_curve_lut(shadows: int, midtones: int, highlights: int) -> np.ndarray:
@@ -1768,6 +2614,51 @@ def build_unique_output_path(export_dir: str, img_name: str) -> str:
         counter += 1
 
 
+def _find_ffmpeg() -> str | None:
+    """
+    Путь к ffmpeg, если установлен (для быстрого кодирования H.264).
+
+    Важно: winget-пакет Gyan.FFmpeg устанавливает ffmpeg как портативное
+    приложение в папку WinGet Packages и не всегда прописывает путь в PATH,
+    поэтому одного shutil.which здесь недостаточно.
+    """
+    # 1. Обычный поиск в PATH
+    exe = shutil.which("ffmpeg")
+    if exe:
+        return exe
+
+    # 2. Если не нашли, пробуем стандартный путь winget-пакета Gyan.FFmpeg
+    local_appdata = os.environ.get("LOCALAPPDATA")
+    if local_appdata:
+        base = Path(local_appdata) / "Microsoft" / "WinGet" / "Packages"
+        try:
+            if base.exists():
+                # Ищем каталог пакета Gyan.FFmpeg_*
+                for pkg_dir in base.glob("Gyan.FFmpeg_*"):
+                    # Внутри пакета лежит папка вида ffmpeg-*-full_build/bin/ffmpeg.exe
+                    for ff_dir in pkg_dir.glob("ffmpeg-*full_build"):
+                        candidate = ff_dir / "bin" / "ffmpeg.exe"
+                        if candidate.exists():
+                            return str(candidate)
+        except Exception:
+            # Любые проблемы при обходе WinGet-папок не должны ломать приложение
+            pass
+
+    # 3. Попытка угадать типичные ручные пути установки
+    common_paths = [
+        Path("C:/Program Files/ffmpeg/bin/ffmpeg.exe"),
+        Path("C:/ffmpeg/bin/ffmpeg.exe"),
+    ]
+    for p in common_paths:
+        try:
+            if p.exists():
+                return str(p)
+        except Exception:
+            continue
+
+    return None
+
+
 def render_card_video(
     image_path: str,
     video_path: str,
@@ -1777,22 +2668,53 @@ def render_card_video(
     output_path: str,
     max_duration: float = 8.0,
     progress_callback=None,
+    render_preset: str = "balanced",
+    *,
+    export_size: tuple[int, int] = (900, 1200),
+    export_fps: float = 60.0,
+    export_codec: str = "h264",
 ) -> None:
     """
-    Рендер одной видео-карточки на базе OpenCV:
-    - ограничиваем видео максимум 8 секундами;
-    - приводим размер к 900x1200 px;
-    - накладываем видео на картинку в режиме «Экран»;
-    - применяем кривую по трём точкам (тени/средние/света);
-    - сохраняем результат в .mp4.
-    """
-    # Размер итогового кадра согласно ТЗ (OpenCV использует (ширина, высота))
-    target_w, target_h = 900, 1200
+    Рендер одной видео-карточки на базе OpenCV.
 
-    # Загружаем фон-картинку через Pillow, чтобы уверенно поддерживать WEBP и другие форматы
+    render_preset: "quality" (медленно, лучше картинка), "balanced", "fast" (максимально быстро).
+    export_size: итоговый размер кадра (ширина, высота), по умолчанию 900x1200.
+    export_fps: целевая частота кадров (24 / 30 / 60), по умолчанию 60.
+    export_codec: логическое имя кодека ("h264", "mpeg4" и т.п.).
+
+    В режиме "fast" обработка идёт в половинном разрешении, затем апскейл до export_size.
+    """
+    # Итоговый размер вывода (OpenCV: ширина, высота)
+    out_w, out_h = export_size
+
+    if render_preset == "quality":
+        interp = cv2.INTER_AREA
+        use_fast_blend = False
+        ffmpeg_preset = "medium"
+        progress_interval = 5
+        process_w, process_h = out_w, out_h
+        upscale_output = False
+    elif render_preset == "fast":
+        interp = cv2.INTER_NEAREST
+        use_fast_blend = True
+        ffmpeg_preset = "ultrafast"
+        progress_interval = 40
+        # Обработка в половинном разрешении — в ~4 раза меньше пикселей, затем апскейл
+        process_w, process_h = max(1, out_w // 2), max(1, out_h // 2)
+        upscale_output = True
+    else:
+        interp = cv2.INTER_LINEAR
+        use_fast_blend = True
+        ffmpeg_preset = "veryfast"
+        progress_interval = 12
+        process_w, process_h = out_w, out_h
+        upscale_output = False
+
+    target_w, target_h = process_w, process_h
+
+    # Загружаем фон-картинку через Pillow
     try:
         with Image.open(image_path) as img:
-            # Приводим к RGB и нужному размеру
             img = img.convert("RGB")
             img = img.resize((target_w, target_h), Image.LANCZOS)
             base_frame = np.array(img)
@@ -1805,59 +2727,144 @@ def render_card_video(
     if not cap.isOpened():
         raise RuntimeError(f"Не удалось открыть видео: {video_path}")
 
-    # Получаем FPS исходного видео, по умолчанию 25
-    fps = cap.get(cv2.CAP_PROP_FPS)
-    if not fps or fps <= 0:
-        fps = 25.0
+    # Для экспорта всегда используем фиксированный FPS (24 / 30 / 60),
+    # чтобы ролики были единообразными независимо от исходного видео.
+    fps = float(export_fps) if export_fps and export_fps > 0 else 60.0
 
     # Считаем максимальное число кадров (не более 8 секунд и не более max_duration)
     effective_duration = min(8.0, max_duration)
     max_frames = int(fps * effective_duration)
 
-    # Настраиваем видеозапись в MP4
-    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-    out = cv2.VideoWriter(output_path, fourcc, fps, (target_w, target_h))
-    if not out.isOpened():
-        cap.release()
-        raise RuntimeError(f"Не удалось открыть файл для записи: {output_path}")
-
     # Строим LUT кривой один раз для всего ролика
     curve_lut = build_curve_lut(curve_shadows, curve_midtones, curve_highlights)
 
+    # Кодирование в H.264 (AVC) или альтернативный кодек.
+    ffmpeg_exe = _find_ffmpeg()
+    use_ffmpeg = ffmpeg_exe is not None
+
+    write_w, write_h = out_w, out_h
+    # Подбираем реальные параметры кодека под выбранное логическое имя
+    codec = (export_codec or "h264").lower()
+    if codec == "mpeg4":
+        ffmpeg_codec = "mpeg4"
+        fourcc_candidates = ("mp4v", "XVID", "DIVX")
+    else:
+        # По умолчанию H.264
+        ffmpeg_codec = "libx264"
+        fourcc_candidates = ("avc1", "H264", "mp4v")
+
+    if use_ffmpeg:
+        cmd = [
+            ffmpeg_exe,
+            "-f",
+            "rawvideo",
+            "-pix_fmt",
+            "bgr24",
+            "-s",
+            f"{write_w}x{write_h}",
+            "-r",
+            str(fps),
+            "-i",
+            "pipe:0",
+            "-c:v",
+            ffmpeg_codec,
+            "-profile:v",
+            "main",
+            "-pix_fmt",
+            "yuv420p",
+            "-preset",
+            ffmpeg_preset,
+            "-crf",
+            "23",
+            "-y",
+            output_path,
+        ]
+        try:
+            creationflags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
+            proc = subprocess.Popen(
+                cmd,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                creationflags=creationflags,
+            )
+        except Exception as e:
+            use_ffmpeg = False
+            proc = None
+    else:
+        proc = None
+
+    if not use_ffmpeg or proc is None:
+        # Запись через OpenCV: подбираем fourcc под выбранный кодек
+        for fourcc_code in fourcc_candidates:
+            fourcc = cv2.VideoWriter_fourcc(*fourcc_code)
+            out = cv2.VideoWriter(output_path, fourcc, fps, (write_w, write_h))
+            if out.isOpened():
+                break
+        else:
+            cap.release()
+            raise RuntimeError(f"Не удалось открыть файл для записи: {output_path}")
+    else:
+        out = None
+
     frames_written = 0
 
-    while frames_written < max_frames:
-        ret, frame_bgr = cap.read()
-        if not ret:
-            # Дошли до конца видео
-            break
+    try:
+        while frames_written < max_frames:
+            ret, frame_bgr = cap.read()
+            if not ret:
+                break
 
-        # Приводим кадр к нужному размеру
-        frame_bgr = cv2.resize(frame_bgr, (target_w, target_h), interpolation=cv2.INTER_AREA)
-        # Переводим в RGB для обработки
-        frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
+            # Приводим кадр к нужному размеру (интерполяция по режиму)
+            frame_bgr = cv2.resize(frame_bgr, (target_w, target_h), interpolation=interp)
+            # Переводим в RGB для обработки
+            frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
 
-        # Применяем кривую (LUT) и наложение «Экран»
-        curved = apply_curve_lut(frame_rgb, curve_lut)
-        blended_rgb = screen_blend(base_frame, curved)
+            curved = apply_curve_lut(frame_rgb, curve_lut)
+            blended_rgb = (
+                _screen_blend_fast(base_frame, curved)
+                if use_fast_blend
+                else screen_blend(base_frame, curved)
+            )
 
-        # Возвращаемся в BGR для записи через OpenCV
-        blended_bgr = cv2.cvtColor(blended_rgb, cv2.COLOR_RGB2BGR)
-        out.write(blended_bgr)
-        frames_written += 1
-        # Сообщаем о прогрессе рендера текущего ролика
-        if progress_callback is not None:
+            blended_bgr = cv2.cvtColor(blended_rgb, cv2.COLOR_RGB2BGR)
+            if upscale_output:
+                blended_bgr = cv2.resize(blended_bgr, (write_w, write_h), interpolation=cv2.INTER_LINEAR)
+
+            if use_ffmpeg and proc is not None and proc.stdin is not None:
+                proc.stdin.write(np.ascontiguousarray(blended_bgr).tobytes())
+            elif out is not None:
+                out.write(blended_bgr)
+
+            frames_written += 1
+            # Обновляем прогресс раз в N кадров (N зависит от режима рендера)
+            if progress_callback is not None and (
+                frames_written % progress_interval == 0 or frames_written == max_frames
+            ):
+                try:
+                    progress_callback(frames_written, max_frames)
+                except Exception:
+                    pass
+
+        # Финальное обновление прогресса (на случай раннего выхода из цикла)
+        if progress_callback is not None and frames_written > 0:
             try:
                 progress_callback(frames_written, max_frames)
             except Exception:
-                # Комментарий: ошибки колбэка не должны ломать рендер
                 pass
-
-    cap.release()
-    out.release()
+    finally:
+        cap.release()
+        if out is not None:
+            out.release()
+        if use_ffmpeg and proc is not None and proc.stdin is not None:
+            proc.stdin.close()
+            _, stderr = proc.communicate(timeout=60)
+            if proc.returncode != 0:
+                raise RuntimeError(
+                    f"Ошибка ffmpeg при кодировании: {stderr.decode(errors='replace') if stderr else 'unknown'}"
+                )
 
     if frames_written == 0:
-        # Если не было записано ни одного кадра — считаем это ошибкой
         raise RuntimeError("Видео не содержит ни одного кадра для записи.")
 
 
@@ -1874,13 +2881,41 @@ def main() -> None:
         pass
 
     app = QApplication([])
-    app.setStyleSheet(APP_STYLESHEET)
+    # Путь к стрелке комбобокса (в кавычках для стилей; Qt на Windows лучше грузит по пути с /)
+    _chevron = (ICONS_DIR / "chevron-down.svg").resolve()
+    chevron_path = str(_chevron).replace("\\", "/") if _chevron.exists() else ""
+    _check = (ICONS_DIR / "check.svg").resolve()
+    check_path = str(_check).replace("\\", "/") if _check.exists() else ""
+    app.setStyleSheet(
+        APP_STYLESHEET.replace("{{CHEVRON_DOWN}}", chevron_path).replace("{{CHECK_ICON}}", check_path)
+    )
+    if APP_ICON_PATH.exists():
+        app.setWindowIcon(QIcon(str(APP_ICON_PATH)))
 
-    # Прелоад-окно (splash): фон из Assets/images/bg.webp, поверх — логотип и логи.
-    splash_w, splash_h = 520, 300
+    # Загрузка шрифтов из Assets/fonts
+    global _google_sans_family, _unbounded_family
+    for name, key in [
+        ("GoogleSans-VariableFont_GRAD,opsz,wght.ttf", "_google_sans_family"),
+        ("Unbounded-VariableFont_wght.ttf", "_unbounded_family"),
+    ]:
+        path = FONTS_DIR / name
+        if path.exists():
+            fid = QFontDatabase.addApplicationFont(str(path))
+            if fid != -1:
+                families = QFontDatabase.applicationFontFamilies(fid)
+                if families:
+                    globals()[key] = families[0]
+    if _google_sans_family:
+        app.setFont(QFont(_google_sans_family, 13))
+
+    # Прелоад-окно (splash): фирменный арт + информация, как на референсе
+    splash_w, splash_h = 1024, 584
     splash_pix = QPixmap(splash_w, splash_h)
-    splash_pix.fill(QColor("#111111"))
-    bg_path = BASE_DIR / "Assets" / "images" / "bg.webp"
+    splash_pix.fill(QColor("#020617"))
+    # Основной арт для сплэша (как на референсе); если его нет — используем старый фон
+    bg_path = BASE_DIR / "Assets" / "images" / "splash_banka.png"
+    if not bg_path.exists():
+        bg_path = BASE_DIR / "Assets" / "images" / "bg.webp"
     if bg_path.exists():
         try:
             with Image.open(bg_path) as img:
@@ -1897,65 +2932,75 @@ def main() -> None:
                     painter_bg.end()
         except Exception:
             pass
+    # На сплэше больше нет текста — только сам арт и лоадбар.
+    # Оставляем try/except на случай проблем с изображением.
     try:
-        painter = QPainter(splash_pix)
-        painter.setRenderHint(QPainter.Antialiasing)
-
-        # Логотип: берём ivan.jpg, если есть; размещаем слева
-        avatar_path = BASE_DIR / "Assets" / "images" / "ivan.jpg"
-        if avatar_path.exists():
-            raw = QPixmap(str(avatar_path))
-            if not raw.isNull():
-                raw = raw.scaled(120, 120, Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation)
-                circle = QPixmap(120, 120)
-                circle.fill(Qt.transparent)
-                p2 = QPainter(circle)
-                p2.setRenderHint(QPainter.Antialiasing)
-                p2.setRenderHint(QPainter.SmoothPixmapTransform)
-                p2.setBrush(Qt.white)
-                p2.setPen(Qt.NoPen)
-                p2.drawEllipse(0, 0, 120, 120)
-                p2.setCompositionMode(QPainter.CompositionMode_SourceIn)
-                p2.drawPixmap(0, 0, raw)
-                p2.end()
-                painter.drawPixmap(40, 90, circle)
-
-        # Текст справа от логотипа
-        painter.setPen(QColor("#e5e7eb"))
-        painter.drawText(190, 130, "WBO Animation")
-        painter.setPen(QColor("#9ca3af"))
-        painter.drawText(190, 155, "Генератор видео-карточек")
-        painter.setPen(QColor("#4b5563"))
-        painter.drawText(40, 230, "Initializing UI…")
-        painter.drawText(40, 250, "Loading assets…")
-        painter.drawText(40, 270, "Preparing preview engine…")
-        painter.setPen(QColor("#0ea5e9"))
-        painter.drawText(
-            splash_pix.rect().adjusted(0, 0, -40, -20),
-            Qt.AlignBottom | Qt.AlignRight,
-            "Loading  //  please wait"
-        )
-        painter.end()
+        _ = splash_pix.width()  # заглушка, чтобы блок не был пустым
     except Exception:
         pass
 
-    splash = QSplashScreen(splash_pix)
+    # Базовое изображение сплэша для анимации прогресс-бара
+    base_splash = splash_pix.copy()
+
+    # Звук запуска бренда на время показа сплэш-экрана
+    SoundPlayer.play(SOUND_SPLASH_BANKA)
+
+    splash = QSplashScreen(base_splash)
     splash.setWindowFlag(Qt.WindowStaysOnTopHint, True)
     splash.show()
     app.processEvents()
 
-    # Кастомный прелоад на 6 секунд:
-    # просто держим сплэш, пока основное окно «греется».
     start_ts = time.monotonic()
-    while time.monotonic() - start_ts < 6.0:
+    duration = 6.0
+    while True:
+        elapsed = time.monotonic() - start_ts
+        progress = max(0.0, min(1.0, elapsed / duration))
+
+        # Рисуем анимированный прогресс-бар снизу с лёгким свечением
+        frame = base_splash.copy()
+        try:
+            p = QPainter(frame)
+            p.setRenderHint(QPainter.Antialiasing)
+            bar_margin = 40
+            bar_height = 6
+            bar_y = frame.height() - 28
+            bar_rect_w = frame.width() - 2 * bar_margin
+            # фон бара
+            p.fillRect(bar_margin, bar_y, bar_rect_w, bar_height, QColor(15, 23, 42, 180))
+            # заполненная часть
+            fill_w = max(0, int(bar_rect_w * progress) - 2)
+            if fill_w > 0:
+                # Свечение вокруг активной части: чуть выше/ниже и шире, полупрозрачное
+                glow_alpha = int(80 + 70 * progress)
+                glow_color = QColor(14, 165, 233, glow_alpha)  # голубой с альфой
+                p.fillRect(
+                    bar_margin - 2,
+                    bar_y - 3,
+                    fill_w + 6,
+                    bar_height + 6,
+                    glow_color,
+                )
+                # Основная полоса прогресса
+                p.fillRect(bar_margin + 1, bar_y + 1, fill_w, bar_height - 2, QColor("#0ea5e9"))
+            p.end()
+        except Exception:
+            frame = base_splash
+
+        splash.setPixmap(frame)
         app.processEvents()
+
+        if elapsed >= duration:
+            break
         time.sleep(0.01)
 
+    # Останавливаем брендовый звук, даже если он длиннее, чем сплэш
+    SoundPlayer.stop()
+
     window = MainWindow()
-    # При запуске показываем обычное окно (не full-screen),
-    # пользователь сам решает, разворачивать ли приложение.
     window.show()
     splash.finish(window)
+    # Звук старта интерфейса после прелоада
+    SoundPlayer.play(SOUND_OPEN)
     app.exec()
 
 
@@ -1968,7 +3013,7 @@ if __name__ == "__main__":
         try:
             from PySide6.QtWidgets import QApplication, QMessageBox
             app = QApplication([])
-            QMessageBox.critical(None, "WBO Animation — ошибка запуска", str(e) + "\n\n" + err)
+            QMessageBox.critical(None, "Wbo BAMP — ошибка запуска", str(e) + "\n\n" + err)
         except Exception:
             print(err)
             input("Press Enter to close...")

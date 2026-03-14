@@ -1,5 +1,9 @@
 {
   "last_export_path": "D:/Программирование/WBO Animation/export",
   "last_images_path": "D:\\Программирование\\WBO Animation\\Assets\\demo",
-  "last_video_path": "D:\\Программирование\\WBO Animation\\Assets\\video"
+  "last_video_path": "D:\\Программирование\\WBO Animation\\Assets\\video",
+  "render_preset": "balanced",
+  "export_codec": "h264",
+  "export_size": "900x1200",
+  "export_fps": 60
 }

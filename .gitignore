@@ -3,6 +3,7 @@ dist/
 build/
 WBOAnimation/
 *.spec
+installer_output/
 
 # Python
 __pycache__/

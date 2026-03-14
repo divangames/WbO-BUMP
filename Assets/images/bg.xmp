@@ -5,17 +5,22 @@
     xmlns:tiff="http://ns.adobe.com/tiff/1.0/"
     xmlns:xmpMM="http://ns.adobe.com/xap/1.0/mm/"
     xmlns:stEvt="http://ns.adobe.com/xap/1.0/sType/ResourceEvent#"
+    xmlns:stRef="http://ns.adobe.com/xap/1.0/sType/ResourceRef#"
     xmlns:dc="http://purl.org/dc/elements/1.1/"
     xmlns:xmp="http://ns.adobe.com/xap/1.0/"
     xmlns:crs="http://ns.adobe.com/camera-raw-settings/1.0/"
     xmlns:photoshop="http://ns.adobe.com/photoshop/1.0/"
    exif:ExifVersion="0231"
+   exif:ColorSpace="65535"
    tiff:Orientation="1"
-   xmpMM:DocumentID="7438A6D5A54D9B6389735C095113B11E"
+   xmpMM:DocumentID="xmp.did:d31634fd-b0e8-814a-8964-223ae57eef74"
    xmpMM:OriginalDocumentID="7438A6D5A54D9B6389735C095113B11E"
-   xmpMM:InstanceID="xmp.iid:572c8cc3-30c3-5240-98a4-e6a8d3e90693"
+   xmpMM:InstanceID="xmp.iid:91b73d93-b8c4-3040-87f8-92b289e96cd0"
    dc:format="image/webp"
-   xmp:MetadataDate="2026-03-13T04:23:12+07:00"
+   xmp:MetadataDate="2026-03-14T00:30:05+07:00"
+   xmp:CreatorTool="Adobe Photoshop 27.4 (Windows)"
+   xmp:ModifyDate="2026-03-13T12:10:31+07:00"
+   xmp:CreateDate="2026-03-13T11:21:16+07:00"
    crs:Version="18.2"
    crs:ProcessVersion="15.4"
    crs:WhiteBalance="As Shot"
@@ -117,7 +122,7 @@
    crs:HasCrop="False"
    crs:AlreadyApplied="False"
    photoshop:SidecarForExtension="WEBP"
-   photoshop:EmbeddedXMPDigest="00000000000000000000000000000000">
+   photoshop:EmbeddedXMPDigest="336708102142DFED1EEB064BC270AF00">
    <xmpMM:History>
     <rdf:Seq>
      <rdf:li
@@ -132,8 +137,39 @@
       stEvt:when="2026-03-13T04:23:12+07:00"
       stEvt:softwareAgent="Adobe Photoshop Camera Raw 18.2 (Windows)"
       stEvt:changed="/metadata"/>
+     <rdf:li
+      stEvt:action="derived"
+      stEvt:parameters="converted from image/webp to image/tiff"/>
+     <rdf:li
+      stEvt:action="saved"
+      stEvt:instanceID="xmp.iid:d31634fd-b0e8-814a-8964-223ae57eef74"
+      stEvt:when="2026-03-13T12:00:01+07:00"
+      stEvt:softwareAgent="Adobe Photoshop Camera Raw 18.2 (Windows)"
+      stEvt:changed="/"/>
+     <rdf:li
+      stEvt:action="derived"
+      stEvt:parameters="converted from image/tiff to application/vnd.adobe.photoshop"/>
+     <rdf:li
+      stEvt:action="saved"
+      stEvt:instanceID="xmp.iid:0e02769a-6aa1-9f48-9188-6e2361f0f1ba"
+      stEvt:when="2026-03-13T12:10:31+07:00"
+      stEvt:softwareAgent="Adobe Photoshop 27.4 (Windows)"
+      stEvt:changed="/"/>
+     <rdf:li
+      stEvt:action="converted"
+      stEvt:parameters="from application/vnd.adobe.photoshop to image/webp"/>
+     <rdf:li
+      stEvt:action="saved"
+      stEvt:instanceID="xmp.iid:91b73d93-b8c4-3040-87f8-92b289e96cd0"
+      stEvt:when="2026-03-14T00:30:05+07:00"
+      stEvt:softwareAgent="Adobe Photoshop Camera Raw 18.2 (Windows)"
+      stEvt:changed="/metadata"/>
     </rdf:Seq>
    </xmpMM:History>
+   <xmpMM:DerivedFrom
+    stRef:instanceID="xmp.iid:d31634fd-b0e8-814a-8964-223ae57eef74"
+    stRef:documentID="xmp.did:d31634fd-b0e8-814a-8964-223ae57eef74"
+    stRef:originalDocumentID="7438A6D5A54D9B6389735C095113B11E"/>
    <crs:ToneCurvePV2012>
     <rdf:Seq>
      <rdf:li>0, 0</rdf:li>
