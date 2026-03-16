@@ -1,0 +1,22 @@
+{
+  "users": [
+    {
+      "username": "Delbraun",
+      "password_hash": "a83273972ff2a241808ce1b5166dd9cb5ce0ce08482cc4876a4801a6742168f8",
+      "is_admin": true,
+      "is_blocked": false,
+      "tokens": 100000,
+      "messages": [],
+      "password_plain": "0211Fenix91!"
+    },
+    {
+      "username": "wbozon",
+      "password_hash": "e7ed834add1550ac27eb28b0784dcb048ff8cf0566439e9c8d4fba99cab44b4c",
+      "password_plain": "1111",
+      "is_admin": false,
+      "is_blocked": false,
+      "tokens": 100000,
+      "messages": []
+    }
+  ]
+}

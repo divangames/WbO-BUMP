@@ -3,9 +3,11 @@ import sys
 import json
 import time  # Для расчёта времени экспорта
 from pathlib import Path
+from typing import Callable
 import tempfile  # Для временных файлов предпросмотра
 import subprocess
 import shutil
+import zipfile
 
 import numpy as np  # Для математики наложения «Экран»
 import cv2  # Для работы с видео и изображениями
@@ -33,6 +35,8 @@ from PySide6.QtWidgets import (
     QSizePolicy,
     QSizeGrip,
     QSplashScreen,
+    QSystemTrayIcon,
+    QMenu,
 )
 from PySide6.QtGui import (
     QPixmap,
@@ -47,8 +51,10 @@ from PySide6.QtGui import (
     QShortcut,
     QFont,
     QFontDatabase,
+    QDesktopServices,
 )
-from PySide6.QtCore import Qt, QSize, QUrl, QTimer, QByteArray, QCoreApplication, QProcess, QSettings
+from PySide6.QtCore import Qt, QSize, QUrl, QTimer, QByteArray, QCoreApplication, QProcess, QSettings, QPoint
+from PySide6.QtNetwork import QNetworkAccessManager, QNetworkRequest, QNetworkReply
 
 try:
     from PySide6.QtSvg import QSvgRenderer
@@ -64,7 +70,10 @@ from ui_common import DialogTitleBar
 # ВАЖНО: комментарии всегда на русском, не удалять при доработках
 
 # Версия приложения (для статус-бара, «О программе» и сплэша)
-APP_VERSION = "0.1.2.2"
+APP_VERSION = "0.1.2.2.1"
+
+# Проверка обновлений: последний релиз на GitHub
+GITHUB_RELEASES_API = "https://api.github.com/repos/divangames/WbO-BUMP/releases/latest"
 
 # Базовая папка приложения:
 # - при запуске из Python — корень проекта (рядом с main.py);
@@ -120,6 +129,124 @@ def load_phosphor_icon(name: str, size: int = 20, color: str = "#e0e0e0") -> QIc
 
     return QIcon()
 
+
+USERS_DB_PATH = BASE_DIR / "users.json"
+
+
+def _hash_password(raw: str) -> str:
+    """Простейший хэш пароля (для локального использования, без сетевого сервера)."""
+    import hashlib
+
+    salt = "wbo-bamp-local-salt"
+    return hashlib.sha256((raw + salt).encode("utf-8")).hexdigest()
+
+
+def _bank_word(n: int) -> str:
+    """Склонение слова «банка» по числу (1 банка, 2 банки, 5 банок)."""
+    n = abs(int(n))
+    if 11 <= (n % 100) <= 14:
+        return "банок"
+    last = n % 10
+    if last == 1:
+        return "банка"
+    if 2 <= last <= 4:
+        return "банки"
+    return "банок"
+
+
+def _format_int_spaces(n: int) -> str:
+    """Формат числа с пробелами по тысячам: 10000 -> '10 000'."""
+    try:
+        return f"{int(n):,}".replace(",", " ")
+    except Exception:
+        return str(n)
+
+
+def _icon_img_tag(icon_name: str, size: int = 14) -> str:
+    """HTML-тег <img> для иконок из Assets/icons (для QLabel rich text)."""
+    try:
+        p = ICONS_DIR / f"{icon_name}.svg"
+        if not p.exists():
+            p = ICONS_DIR / f"{icon_name}.png"
+        if not p.exists():
+            return ""
+        uri = p.resolve().as_uri()
+        return f"<img src='{uri}' width='{size}' height='{size}'/>"
+    except Exception:
+        return ""
+
+
+def _load_users() -> dict:
+    """Загрузка базы пользователей из JSON."""
+    if not USERS_DB_PATH.exists():
+        # По умолчанию создаём админа Delbraun / 0211Fenix91! с нулевыми токенами
+        return {
+            "users": [
+                {
+                    "username": "Delbraun",
+                    "password_hash": _hash_password("0211Fenix91!"),
+                    "password_plain": "0211Fenix91!",
+                    "is_admin": True,
+                    "is_blocked": False,
+                    "tokens": 0,
+                    "messages": [],
+                }
+            ]
+        }
+    try:
+        with USERS_DB_PATH.open("r", encoding="utf-8") as f:
+            data = json.load(f)
+        if not isinstance(data, dict) or "users" not in data:
+            raise ValueError("invalid users.json")
+        # Гарантируем наличие хотя бы одного админа Delbraun / 0211Fenix91!
+        has_delbraun = False
+        for u in data.get("users", []):
+            if u.get("username") == "Delbraun":
+                has_delbraun = True
+                # Если почему-то нет флага is_admin, включаем его
+                u.setdefault("is_admin", True)
+                u.setdefault("password_plain", "0211Fenix91!")
+        if not has_delbraun:
+            data.setdefault("users", []).append(
+                {
+                    "username": "Delbraun",
+                    "password_hash": _hash_password("0211Fenix91!"),
+                    "is_admin": True,
+                    "is_blocked": False,
+                    "tokens": 0,
+                    "messages": [],
+                }
+            )
+            _save_users(data)
+        return data
+    except Exception:
+        return {"users": []}
+
+
+def _save_users(data: dict) -> None:
+    """Сохранение базы пользователей в JSON."""
+    try:
+        with USERS_DB_PATH.open("w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+    except Exception:
+        pass
+
+
+def _find_user(data: dict, username: str) -> dict | None:
+    for u in data.get("users", []):
+        if u.get("username") == username:
+            return u
+    return None
+
+
+class CurrentUser:
+    """Текущий авторизованный пользователь."""
+
+    def __init__(self, username: str, is_admin: bool, tokens: int, is_blocked: bool) -> None:
+        self.username = username
+        self.is_admin = is_admin
+        self.tokens = tokens
+        self.is_blocked = is_blocked
 
 # Единая тёмная тема: один фон, одна рамка, аккуратный вид
 APP_STYLESHEET = """
@@ -522,6 +649,169 @@ HELP_DIALOG_STYLE = """
     QPushButton:hover { background: rgba(71, 85, 105, 0.5); }
 """
 
+# Стиль уведомления в трее (в духе приложения: тёмная тема, акцент)
+TRAY_NOTIFICATION_STYLE = """
+    QDialog {
+        background-color: #1a1f26;
+        border: 1px solid #2a3038;
+        border-radius: 10px;
+        border-top: 2px solid #3d454f;
+    }
+    QLabel#trayNotificationTitle { color: #e6edf3; font-size: 13px; font-weight: 600; background: transparent; }
+    QLabel#trayNotificationBody { color: #b1b8c2; font-size: 12px; background: transparent; }
+    QPushButton#trayBtnOpen {
+        background: rgba(14, 165, 233, 0.2);
+        color: #38bdf8;
+        border: 1px solid #0ea5e9;
+        border-radius: 6px;
+        padding: 8px 14px;
+        font-size: 12px;
+        font-weight: 500;
+    }
+    QPushButton#trayBtnOpen:hover {
+        background: rgba(14, 165, 233, 0.35);
+        border-color: #38bdf8;
+        color: #7dd3fc;
+    }
+    QPushButton#trayBtnOk {
+        background: transparent;
+        color: #94a3b8;
+        border: 1px solid #475569;
+        border-radius: 6px;
+        padding: 8px 14px;
+        font-size: 12px;
+    }
+    QPushButton#trayBtnOk:hover {
+        background: rgba(71, 85, 105, 0.5);
+        color: #e2e8f0;
+        border-color: #64748b;
+    }
+"""
+
+# Стиль попапа «Доступно обновление» (слева снизу внутри окна, в духе кнопок удалить/копировать)
+UPDATE_AVAILABLE_POPUP_STYLE = """
+    QDialog {
+        background-color: #1a1f26;
+        border: 1px solid #2a3038;
+        border-left: 3px solid #238636;
+        border-radius: 8px;
+    }
+    QFrame#updatePopupTextBlock {
+        background-color: #14181c;
+        border-radius: 6px;
+        border: none;
+    }
+    QLabel#updatePopupTitle { color: #e6edf3; font-size: 13px; font-weight: 600; background: transparent; }
+    QLabel#updatePopupText { color: #b1b8c2; font-size: 12px; background: transparent; }
+    QPushButton#updatePopupBtn {
+        background: transparent;
+        border: 1px solid #238636;
+        color: #3fb950;
+        font-weight: 600;
+        border-radius: 6px;
+        padding: 6px 14px;
+        font-size: 12px;
+    }
+    QPushButton#updatePopupBtn:hover {
+        background: rgba(35, 134, 54, 0.2);
+        border-color: #2ea043;
+        color: #56d364;
+    }
+    QPushButton#updatePopupClose {
+        background: transparent;
+        border: none;
+        color: #94a3b8;
+        font-size: 14px;
+        padding: 2px 6px;
+    }
+    QPushButton#updatePopupClose:hover {
+        background: rgba(185, 28, 28, 0.3);
+        color: #f87171;
+    }
+"""
+
+
+def show_export_complete_tray_notification(
+    main_window: QMainWindow,
+    title: str,
+    message: str,
+    on_open: Callable[[], None],
+    on_open_folder: Callable[[], None] | None = None,
+) -> QDialog:
+    """
+    Показывает стильное уведомление об окончании экспорта в углу экрана.
+    Висит до нажатия «Открыть» / «Открыть папку» / «ОК». Возвращает диалог (держите ссылку).
+    """
+    dlg = QDialog(main_window)
+    dlg.setWindowFlags(
+        Qt.WindowType.Dialog
+        | Qt.WindowType.FramelessWindowHint
+        | Qt.WindowType.WindowStaysOnTopHint
+        | Qt.WindowType.Tool
+    )
+    dlg.setStyleSheet(TRAY_NOTIFICATION_STYLE)
+    dlg.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, False)
+    layout = QVBoxLayout(dlg)
+    layout.setContentsMargins(0, 0, 0, 0)
+    layout.setSpacing(0)
+
+    # Верхняя полоска с иконкой/акцентом
+    header = QFrame()
+    header.setFixedHeight(4)
+    header.setStyleSheet("background: qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 #0ea5e9, stop:1 #38bdf8); border-radius: 10px 10px 0 0;")
+    layout.addWidget(header)
+
+    content = QWidget()
+    content_ly = QVBoxLayout(content)
+    content_ly.setContentsMargins(16, 12, 16, 14)
+    content_ly.setSpacing(10)
+
+    title_lbl = QLabel(title)
+    title_lbl.setObjectName("trayNotificationTitle")
+    content_ly.addWidget(title_lbl)
+
+    body_lbl = QLabel(message)
+    body_lbl.setObjectName("trayNotificationBody")
+    body_lbl.setWordWrap(True)
+    body_lbl.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+    content_ly.addWidget(body_lbl)
+
+    btn_row = QHBoxLayout()
+    btn_row.addStretch(1)
+    btn_ok = QPushButton("ОК")
+    btn_ok.setObjectName("trayBtnOk")
+    btn_ok.clicked.connect(dlg.accept)
+    btn_open = QPushButton("Открыть")
+    btn_open.setObjectName("trayBtnOpen")
+
+    def _on_open() -> None:
+        on_open()
+        dlg.accept()
+
+    btn_open.clicked.connect(_on_open)
+    btn_row.addWidget(btn_ok)
+    btn_row.addWidget(btn_open)
+    if on_open_folder is not None:
+        btn_folder = QPushButton("Открыть папку")
+        btn_folder.setObjectName("trayBtnOpen")
+        def _do_open_folder() -> None:
+            on_open()
+            on_open_folder()
+            dlg.accept()
+        btn_folder.clicked.connect(_do_open_folder)
+        btn_row.addWidget(btn_folder)
+    content_ly.addLayout(btn_row)
+    layout.addWidget(content)
+
+    dlg.setFixedSize(340, 140)
+    screen = QGuiApplication.primaryScreen()
+    if screen:
+        geo = screen.availableGeometry()
+        dlg.move(geo.right() - dlg.width() - 24, geo.bottom() - dlg.height() - 24)
+    QShortcut(QKeySequence("Escape"), dlg, dlg.accept)
+    dlg.show()
+    return dlg
+
 
 def _format_readme_for_display(raw: str) -> str:
     """Убирает markdown-разметку из README для читаемого отображения в диалоге."""
@@ -605,6 +895,8 @@ def load_config() -> dict:
             "export_size": "900x1200",
             # целевой FPS экспорта: 24 / 30 / 60
             "export_fps": 60,
+            # Последний вошедший пользователь (для автологина)
+            "auth_username": "",
         }
     try:
         with open(CONFIG_FILE, "r", encoding="utf-8") as f:
@@ -619,6 +911,7 @@ def load_config() -> dict:
     data.setdefault("export_codec", "h264")
     data.setdefault("export_size", "900x1200")
     data.setdefault("export_fps", 60)
+    data.setdefault("auth_username", "")
     return data
 
 
@@ -779,6 +1072,9 @@ class MainWindow(QMainWindow):
         self._preview_timer = QTimer(self)
         self._preview_timer.timeout.connect(self._on_preview_tick)
 
+        # Текущий пользователь (по умолчанию гость без токенов)
+        self.current_user: CurrentUser | None = None
+
         # Режимы предпросмотра (уменьшенное превью, чтобы не занимало весь центр).
         # Экспорт по-прежнему делается в 900x1200.
         self.preview_target_w = 320
@@ -796,11 +1092,35 @@ class MainWindow(QMainWindow):
         if APP_ICON_PATH.exists():
             self.setWindowIcon(QIcon(str(APP_ICON_PATH)))
 
+        # Трей: иконка и контекстное меню (чтобы приложение можно было свернуть во время экспорта)
+        self._tray_icon: QSystemTrayIcon | None = None
+        self._tray_menu: QMenu | None = None
+        if QSystemTrayIcon.isSystemTrayAvailable():
+            self._tray_icon = QSystemTrayIcon(self)
+            if APP_ICON_PATH.exists():
+                self._tray_icon.setIcon(QIcon(str(APP_ICON_PATH)))
+            self._tray_icon.setToolTip("Wbo BAMP — генератор видео-карточек")
+            self._tray_menu = QMenu()
+            act_show = QAction("Показать", self)
+            act_show.triggered.connect(self._tray_show_window)
+            self._tray_menu.addAction(act_show)
+            self._tray_menu.addSeparator()
+            act_quit = QAction("Выход", self)
+            act_quit.triggered.connect(QCoreApplication.quit)
+            self._tray_menu.addAction(act_quit)
+            self._tray_icon.setContextMenu(self._tray_menu)
+            self._tray_icon.activated.connect(self._on_tray_activated)
+            self._tray_icon.show()
+
         # Разрешаем drag & drop на всё окно, чтобы было проще попадать
         self.setAcceptDrops(True)
 
         self._build_ui()
         self._setup_actions_and_menu()
+
+        # Инициализируем состояние меню пользователя (гость по умолчанию)
+        self._ensure_user_loaded()
+        self._try_autologin()
 
         # Загружаем список доступных видео из папки Assets/video
         self.load_video_list()
@@ -811,6 +1131,9 @@ class MainWindow(QMainWindow):
             self.load_images_from_dir(str(demo_dir.resolve()))
         if self.list_widget.count() > 0 and self.list_widget.currentRow() < 0:
             self.list_widget.setCurrentRow(0)
+
+        # Проверка обновлений при запуске: через 1.8 с показывается попап слева снизу при наличии новой версии
+        QTimer.singleShot(1800, self._check_for_updates_on_startup)
 
     def dragEnterEvent(self, event) -> None:
         """Разрешаем drag & drop файлов на всё окно, прокидываем в список карточек."""
@@ -824,7 +1147,771 @@ class MainWindow(QMainWindow):
         settings = QSettings("WboBAMP", "WboBAMP")
         settings.setValue("mainWindow/geometry", self.saveGeometry())
         self._stop_preview_video()
+        if self._tray_icon:
+            self._tray_icon.hide()
         super().closeEvent(event)
+
+    def _tray_show_window(self) -> None:
+        """Восстановить и активировать главное окно из трея."""
+        self.showNormal()
+        self.raise_()
+        self.activateWindow()
+
+    # --- Пользователи и токены ---
+
+    def _ensure_user_loaded(self) -> None:
+        """Простейшая инициализация: если никто не вошёл — работаем как гость."""
+        if self.current_user is None:
+            # Гость без прав, с начальным пакетом банок
+            self.current_user = CurrentUser(username="guest", is_admin=False, tokens=100, is_blocked=False)
+        self._update_user_menu_state()
+
+    def _try_autologin(self) -> None:
+        """Автовход по последнему пользователю из конфига (без пароля, локальный режим)."""
+        try:
+            username = (self.config.get("auth_username") or "").strip()
+        except Exception:
+            username = ""
+        if not username:
+            return
+        data = _load_users()
+        u = _find_user(data, username)
+        if not u:
+            return
+        if u.get("is_blocked"):
+            # Если пользователь заблокирован — сбрасываем автологин
+            self.config["auth_username"] = ""
+            save_config(self.config)
+            return
+        self.current_user = CurrentUser(
+            username=str(u.get("username") or ""),
+            is_admin=bool(u.get("is_admin")),
+            tokens=int(u.get("tokens", 0)),
+            is_blocked=bool(u.get("is_blocked")),
+        )
+        self._update_user_menu_state()
+
+    def _update_user_menu_state(self) -> None:
+        """Обновление подпунктов меню 'Пользователь' в зависимости от текущего состояния."""
+        cu = self.current_user
+        has_user = cu is not None and cu.username != "guest"
+        self.act_profile.setEnabled(has_user)
+        self.act_logout.setEnabled(has_user)
+        # Админ-панель только для админа
+        self.act_admin_panel.setVisible(bool(cu and cu.is_admin))
+        # Обновляем строку статуса с информацией о пользователе и токенах
+        if hasattr(self, "status_user_label"):
+            user_icon = _icon_img_tag("User_01", 14)
+            bank_icon = _icon_img_tag("Cupcake", 14)
+            if cu is None or cu.username == "guest":
+                banks = _format_int_spaces(cu.tokens if cu is not None else 100)
+                self.status_user_label.setText(
+                    f"{user_icon} "
+                    f"<span style='font-weight:700;color:#e6edf3'>guest</span>"
+                    f" <span style='color:#8b949e'>(Гость)</span>"
+                    f" <span style='color:#8b949e'>|</span> "
+                    f"{bank_icon} <span style='color:#8b949e'>Банок:</span> "
+                    f"<span style='font-weight:700;color:#e6edf3'>{banks}</span>"
+                )
+            else:
+                role = "Админ" if cu.is_admin else "Пользователь"
+                banks = _format_int_spaces(cu.tokens)
+                # Выделяем имя пользователя и количество банок
+                self.status_user_label.setText(
+                    f"{user_icon} "
+                    f"<span style='font-weight:700;color:#e6edf3'>{cu.username}</span>"
+                    f" <span style='color:#8b949e'>({role})</span>"
+                    f" <span style='color:#8b949e'>|</span> "
+                    f"{bank_icon} <span style='color:#8b949e'>Банок:</span> "
+                    f"<span style='font-weight:700;color:#e6edf3'>{banks}</span>"
+                )
+
+    def _show_unread_messages_if_any(self) -> None:
+        """Показывает непрочитанные сообщения текущему пользователю и помечает их как прочитанные."""
+        cu = self.current_user
+        if cu is None or cu.username in ("", "guest"):
+            return
+        data = _load_users()
+        u = _find_user(data, cu.username)
+        if u is None:
+            return
+        msgs = [m for m in u.get("messages", []) if not m.get("read")]
+        if not msgs:
+            return
+        text_lines = [m.get("text", "") for m in msgs if m.get("text")]
+        if not text_lines:
+            return
+        dlg = QDialog(self)
+        dlg.setWindowFlags(Qt.WindowType.Dialog | Qt.WindowType.FramelessWindowHint)
+        dlg.setStyleSheet(HELP_DIALOG_STYLE)
+        ly = QVBoxLayout(dlg)
+        ly.setContentsMargins(0, 0, 0, 0)
+        ly.setSpacing(0)
+        ly.addWidget(DialogTitleBar(dlg, "Сообщения"))
+        content = QWidget()
+        cly = QVBoxLayout(content)
+        cly.setContentsMargins(12, 8, 12, 12)
+        lbl = QLabel("\n\n".join(text_lines))
+        lbl.setWordWrap(True)
+        cly.addWidget(lbl)
+        btn_ok = QPushButton("ОК")
+        btn_ok.clicked.connect(dlg.accept)
+        cly.addWidget(btn_ok, alignment=Qt.AlignRight)
+        ly.addWidget(content)
+        QShortcut(QKeySequence("Escape"), dlg, dlg.reject)
+        dlg.resize(380, 260)
+        dlg.exec()
+        # Помечаем сообщения как прочитанные
+        for m in u.get("messages", []):
+            m["read"] = True
+        _save_users(data)
+
+    def _show_login_dialog(self) -> None:
+        self._ensure_user_loaded()
+        from PySide6.QtWidgets import QLineEdit
+
+        dlg = QDialog(self)
+        dlg.setWindowFlags(Qt.WindowType.Dialog | Qt.WindowType.FramelessWindowHint)
+        dlg.setStyleSheet(HELP_DIALOG_STYLE)
+        ly = QVBoxLayout(dlg)
+        ly.setContentsMargins(0, 0, 0, 0)
+        ly.setSpacing(0)
+        ly.addWidget(DialogTitleBar(dlg, "Вход"))
+
+        content = QWidget()
+        cly = QVBoxLayout(content)
+        cly.setContentsMargins(12, 8, 12, 12)
+        lbl = QLabel("Введите логин и пароль.")
+        cly.addWidget(lbl)
+        login_edit = QLineEdit()
+        login_edit.setPlaceholderText("Логин")
+        cly.addWidget(login_edit)
+        pwd_edit = QLineEdit()
+        pwd_edit.setPlaceholderText("Пароль")
+        pwd_edit.setEchoMode(QLineEdit.EchoMode.Password)
+        cly.addWidget(pwd_edit)
+
+        btn_row = QHBoxLayout()
+        btn_ok = QPushButton("Войти")
+        btn_cancel = QPushButton("Отмена")
+        btn_row.addStretch(1)
+        btn_row.addWidget(btn_cancel)
+        btn_row.addWidget(btn_ok)
+        cly.addLayout(btn_row)
+        ly.addWidget(content)
+
+        def on_accept() -> None:
+            data = _load_users()
+            user = _find_user(data, login_edit.text().strip())
+            if not user or user.get("password_hash") != _hash_password(pwd_edit.text()):
+                QMessageBox.warning(self, "Ошибка", "Неверный логин или пароль.")
+                return
+            if user.get("is_blocked"):
+                QMessageBox.warning(self, "Доступ запрещён", "Пользователь заблокирован.")
+                return
+            self.current_user = CurrentUser(
+                username=user["username"],
+                is_admin=bool(user.get("is_admin")),
+                tokens=int(user.get("tokens", 0)),
+                is_blocked=bool(user.get("is_blocked")),
+            )
+            # Запоминаем последнего вошедшего пользователя
+            self.config["auth_username"] = user["username"]
+            save_config(self.config)
+            self._update_user_menu_state()
+            dlg.accept()
+
+        btn_ok.clicked.connect(on_accept)
+        btn_cancel.clicked.connect(dlg.reject)
+        QShortcut(QKeySequence("Escape"), dlg, dlg.reject)
+        dlg.resize(320, 200)
+        result = dlg.exec()
+        if result == QDialog.DialogCode.Accepted:
+            # После входа показываем сообщения и при необходимости админ-панель
+            self._show_unread_messages_if_any()
+            if self.current_user is not None and self.current_user.is_admin:
+                self._show_admin_panel()
+
+    def _show_register_dialog(self) -> None:
+        from PySide6.QtWidgets import QLineEdit
+
+        dlg = QDialog(self)
+        dlg.setWindowFlags(Qt.WindowType.Dialog | Qt.WindowType.FramelessWindowHint)
+        dlg.setStyleSheet(HELP_DIALOG_STYLE)
+        ly = QVBoxLayout(dlg)
+        ly.setContentsMargins(0, 0, 0, 0)
+        ly.setSpacing(0)
+        ly.addWidget(DialogTitleBar(dlg, "Регистрация"))
+
+        content = QWidget()
+        cly = QVBoxLayout(content)
+        cly.setContentsMargins(12, 8, 12, 12)
+        lbl = QLabel("Создайте новый аккаунт.\nПароль хранится локально в хэше.")
+        cly.addWidget(lbl)
+        login_edit = QLineEdit()
+        login_edit.setPlaceholderText("Логин")
+        cly.addWidget(login_edit)
+        pwd_edit = QLineEdit()
+        pwd_edit.setPlaceholderText("Пароль")
+        pwd_edit.setEchoMode(QLineEdit.EchoMode.Password)
+        cly.addWidget(pwd_edit)
+        pwd2_edit = QLineEdit()
+        pwd2_edit.setPlaceholderText("Повторите пароль")
+        pwd2_edit.setEchoMode(QLineEdit.EchoMode.Password)
+        cly.addWidget(pwd2_edit)
+
+        btn_row = QHBoxLayout()
+        btn_ok = QPushButton("Зарегистрироваться")
+        btn_cancel = QPushButton("Отмена")
+        btn_row.addStretch(1)
+        btn_row.addWidget(btn_cancel)
+        btn_row.addWidget(btn_ok)
+        cly.addLayout(btn_row)
+        ly.addWidget(content)
+
+        def on_accept() -> None:
+            login = login_edit.text().strip()
+            pwd = pwd_edit.text()
+            pwd2 = pwd2_edit.text()
+            if not login or not pwd:
+                QMessageBox.warning(self, "Ошибка", "Логин и пароль не могут быть пустыми.")
+                return
+            if pwd != pwd2:
+                QMessageBox.warning(self, "Ошибка", "Пароли не совпадают.")
+                return
+            data = _load_users()
+            if _find_user(data, login) is not None:
+                QMessageBox.warning(self, "Ошибка", "Пользователь с таким логином уже существует.")
+                return
+            data.setdefault("users", []).append(
+                {
+                    "username": login,
+                    "password_hash": _hash_password(pwd),
+                    "password_plain": pwd,
+                    "is_admin": False,
+                    "is_blocked": False,
+                    "tokens": 0,
+                    "messages": [],
+                }
+            )
+            _save_users(data)
+            QMessageBox.information(self, "Готово", "Аккаунт создан. Теперь можно войти.")
+            dlg.accept()
+
+        btn_ok.clicked.connect(on_accept)
+        btn_cancel.clicked.connect(dlg.reject)
+        QShortcut(QKeySequence("Escape"), dlg, dlg.reject)
+        dlg.resize(340, 230)
+        dlg.exec()
+
+    def _show_profile_dialog(self) -> None:
+        self._ensure_user_loaded()
+        cu = self.current_user
+        if cu is None or cu.username == "guest":
+            # Показываем баланс гостя
+            banks = 0
+            try:
+                banks = int(self.current_user.tokens) if self.current_user is not None else 100
+            except Exception:
+                banks = 100
+            QMessageBox.information(
+                self,
+                "Профиль",
+                f"Гостевой режим.\nДоступно: {banks} {_bank_word(banks)}.",
+            )
+            return
+        # Считаем непрочитанные сообщения
+        data = _load_users()
+        u = _find_user(data, cu.username)
+        unread = 0
+        if u is not None:
+            for m in u.get("messages", []):
+                if not m.get("read"):
+                    unread += 1
+        dlg = QDialog(self)
+        dlg.setWindowFlags(Qt.WindowType.Dialog | Qt.WindowType.FramelessWindowHint)
+        dlg.setStyleSheet(HELP_DIALOG_STYLE)
+        ly = QVBoxLayout(dlg)
+        ly.setContentsMargins(0, 0, 0, 0)
+        ly.setSpacing(0)
+        ly.addWidget(DialogTitleBar(dlg, "Профиль"))
+
+        content = QWidget()
+        cly = QVBoxLayout(content)
+        cly.setContentsMargins(12, 8, 12, 12)
+        role = "Администратор" if cu.is_admin else "Пользователь"
+        user_icon = _icon_img_tag("User_01", 16)
+        bank_icon = _icon_img_tag("Cupcake", 16)
+        banks = _format_int_spaces(cu.tokens)
+        text = (
+            f"{user_icon} <b>{cu.username}</b><br/>"
+            f"<span style='color:#8b949e'>Роль:</span> {role}<br/>"
+            f"{bank_icon} <span style='color:#8b949e'>Банок:</span> <b>{banks}</b>"
+        )
+        if unread > 0:
+            text += f"<br/><span style='color:#8b949e'>Непрочитанные сообщения:</span> <b>{unread}</b>"
+        lbl = QLabel(text)
+        lbl.setWordWrap(True)
+        lbl.setTextFormat(Qt.TextFormat.RichText)
+        cly.addWidget(lbl)
+
+        btn_ok = QPushButton("ОК")
+        btn_ok.clicked.connect(dlg.accept)
+        cly.addWidget(btn_ok, alignment=Qt.AlignRight)
+        ly.addWidget(content)
+
+        QShortcut(QKeySequence("Escape"), dlg, dlg.reject)
+        dlg.resize(320, 200)
+        dlg.exec()
+
+    def _logout_current_user(self) -> None:
+        self.current_user = CurrentUser(username="guest", is_admin=False, tokens=0, is_blocked=False)
+        self.config["auth_username"] = ""
+        save_config(self.config)
+        self._update_user_menu_state()
+
+    def _show_admin_panel(self) -> None:
+        self._ensure_user_loaded()
+        cu = self.current_user
+        if cu is None or not cu.is_admin:
+            QMessageBox.warning(self, "Нет доступа", "Админ-панель доступна только администраторам.")
+            return
+
+        from PySide6.QtWidgets import QTableWidget, QTableWidgetItem, QLineEdit, QTextEdit
+
+        data = _load_users()
+        users = data.get("users", [])
+
+        dlg = QDialog(self)
+        dlg.setWindowFlags(Qt.WindowType.Dialog | Qt.WindowType.FramelessWindowHint)
+        dlg.setStyleSheet(HELP_DIALOG_STYLE)
+        ly = QVBoxLayout(dlg)
+        ly.setContentsMargins(0, 0, 0, 0)
+        ly.setSpacing(0)
+        ly.addWidget(DialogTitleBar(dlg, "Админ-панель"))
+
+        content = QWidget()
+        cly = QVBoxLayout(content)
+        cly.setContentsMargins(12, 8, 12, 12)
+
+        table = QTableWidget()
+        table.setColumnCount(4)
+        table.setHorizontalHeaderLabels(["Логин", "Роль", "Банки", "Статус"])
+        table.setRowCount(len(users))
+        for row, u in enumerate(users):
+            username = str(u.get("username", ""))
+            role = "Админ" if u.get("is_admin") else "Пользователь"
+            tokens = str(u.get("tokens", 0))
+            status = "Заблокирован" if u.get("is_blocked") else "Активен"
+            table.setItem(row, 0, QTableWidgetItem(username))
+            table.setItem(row, 1, QTableWidgetItem(role))
+            table.setItem(row, 2, QTableWidgetItem(tokens))
+            table.setItem(row, 3, QTableWidgetItem(status))
+        table.resizeColumnsToContents()
+        cly.addWidget(table)
+
+        # Блок управления выбранным пользователем
+        controls_row = QHBoxLayout()
+
+        btn_create = QPushButton()
+        btn_create.setProperty("class", "iconOnly accent")
+        btn_create.setIcon(load_phosphor_icon("User_Add", 16))
+        btn_create.setIconSize(QSize(16, 16))
+        btn_create.setToolTip("Создать нового пользователя")
+
+        btn_tokens = QPushButton()
+        btn_tokens.setProperty("class", "iconOnly accent")
+        btn_tokens.setIcon(load_phosphor_icon("Cupcake", 16))
+        btn_tokens.setIconSize(QSize(16, 16))
+        btn_tokens.setToolTip("Изменить количество банок")
+
+        btn_block = QPushButton()
+        btn_block.setProperty("class", "iconOnly danger")
+        btn_block.setIcon(load_phosphor_icon("Lock", 16))
+        btn_block.setIconSize(QSize(16, 16))
+        btn_block.setToolTip("Блокировать или разблокировать пользователя")
+
+        btn_password = QPushButton()
+        btn_password.setProperty("class", "iconOnly")
+        btn_password.setIcon(load_phosphor_icon("Shield_Check", 16))
+        btn_password.setIconSize(QSize(16, 16))
+        btn_password.setToolTip("Сменить пароль пользователя")
+
+        btn_show_password = QPushButton()
+        btn_show_password.setProperty("class", "iconOnly")
+        btn_show_password.setIcon(load_phosphor_icon("image", 16))
+        btn_show_password.setIconSize(QSize(16, 16))
+        btn_show_password.setToolTip("Показать текущий пароль (если сохранён)")
+
+        btn_message = QPushButton()
+        btn_message.setProperty("class", "iconOnly accent")
+        btn_message.setIcon(load_phosphor_icon("Chat_Circle_Check", 16))
+        btn_message.setIconSize(QSize(16, 16))
+        btn_message.setToolTip("Отправить сообщение пользователю")
+
+        btn_delete = QPushButton()
+        btn_delete.setProperty("class", "iconOnly danger")
+        btn_delete.setIcon(load_phosphor_icon("User_Remove", 16))
+        btn_delete.setIconSize(QSize(16, 16))
+        btn_delete.setToolTip("Удалить пользователя (с подтверждением)")
+
+        controls_row.addWidget(btn_create)
+        controls_row.addWidget(btn_tokens)
+        controls_row.addWidget(btn_block)
+        controls_row.addWidget(btn_password)
+        controls_row.addWidget(btn_show_password)
+        controls_row.addWidget(btn_message)
+        controls_row.addWidget(btn_delete)
+        controls_row.addStretch(1)
+        cly.addLayout(controls_row)
+
+        ly.addWidget(content)
+
+        btn_close = QPushButton("Закрыть")
+        btn_close.clicked.connect(dlg.accept)
+        row_close = QHBoxLayout()
+        row_close.addStretch(1)
+        row_close.addWidget(btn_close)
+        ly.addLayout(row_close)
+
+        def _get_selected_user() -> tuple[dict | None, int]:
+            r = table.currentRow()
+            if r < 0 or r >= len(users):
+                return None, -1
+            return users[r], r
+
+        def _refresh_users_from_file(keep_username: str | None = None) -> None:
+            nonlocal data, users
+            data = _load_users()
+            users = data.get("users", [])
+            table.setRowCount(len(users))
+            for row, u in enumerate(users):
+                username = str(u.get("username", ""))
+                role = "Админ" if u.get("is_admin") else "Пользователь"
+                tokens = str(u.get("tokens", 0))
+                status = "Заблокирован" if u.get("is_blocked") else "Активен"
+                table.setItem(row, 0, QTableWidgetItem(username))
+                table.setItem(row, 1, QTableWidgetItem(role))
+                table.setItem(row, 2, QTableWidgetItem(tokens))
+                table.setItem(row, 3, QTableWidgetItem(status))
+                if keep_username and username == keep_username:
+                    table.setCurrentCell(row, 0)
+            table.resizeColumnsToContents()
+
+        def on_change_tokens() -> None:
+            user, _ = _get_selected_user()
+            if not user:
+                QMessageBox.information(dlg, "Выбор пользователя", "Сначала выберите пользователя в таблице.")
+                return
+            text, ok = QInputDialog.getInt(
+                dlg,
+                "Изменить банки",
+                f"Новое количество банок для {user.get('username')}:",
+                int(user.get("tokens", 0)),
+                0,
+                1_000_000,
+            )
+            if not ok:
+                return
+            user["tokens"] = int(text)
+            _save_users({"users": users})
+            table.item(table.currentRow(), 2).setText(str(text))
+            # Если меняем баланс текущего пользователя — обновляем статус сразу
+            if self.current_user is not None and user.get("username") == self.current_user.username:
+                self.current_user.tokens = int(text)
+                self._update_user_menu_state()
+
+        def on_toggle_block() -> None:
+            user, row = _get_selected_user()
+            if not user:
+                QMessageBox.information(dlg, "Выбор пользователя", "Сначала выберите пользователя в таблице.")
+                return
+            is_blocked = bool(user.get("is_blocked"))
+            user["is_blocked"] = not is_blocked
+            _save_users({"users": users})
+            table.item(row, 3).setText("Заблокирован" if user["is_blocked"] else "Активен")
+            # Меняем иконку в зависимости от состояния
+            try:
+                btn_block.setIcon(load_phosphor_icon("Lock_Open" if user["is_blocked"] else "Lock", 16))
+            except Exception:
+                pass
+
+        def on_change_password() -> None:
+            from PySide6.QtWidgets import QLineEdit
+
+            user, _ = _get_selected_user()
+            if not user:
+                QMessageBox.information(dlg, "Выбор пользователя", "Сначала выберите пользователя в таблице.")
+                return
+            pwd_dlg = QDialog(dlg)
+            pwd_dlg.setWindowFlags(Qt.WindowType.Dialog | Qt.WindowType.FramelessWindowHint)
+            pwd_dlg.setStyleSheet(HELP_DIALOG_STYLE)
+            ply = QVBoxLayout(pwd_dlg)
+            ply.setContentsMargins(0, 0, 0, 0)
+            ply.setSpacing(0)
+            ply.addWidget(DialogTitleBar(pwd_dlg, "Смена пароля"))
+            pcontent = QWidget()
+            pcly = QVBoxLayout(pcontent)
+            pcly.setContentsMargins(12, 8, 12, 12)
+            pcly.addWidget(QLabel(f"Новый пароль для {user.get('username')}:"))
+            pwd1 = QLineEdit()
+            pwd1.setEchoMode(QLineEdit.EchoMode.Password)
+            pcly.addWidget(pwd1)
+            pwd2 = QLineEdit()
+            pwd2.setEchoMode(QLineEdit.EchoMode.Password)
+            pcly.addWidget(pwd2)
+            prow = QHBoxLayout()
+            b_ok = QPushButton("Сохранить")
+            b_cancel = QPushButton("Отмена")
+            prow.addStretch(1)
+            prow.addWidget(b_cancel)
+            prow.addWidget(b_ok)
+            pcly.addLayout(prow)
+            ply.addWidget(pcontent)
+
+            def on_save_pwd() -> None:
+                if not pwd1.text() or pwd1.text() != pwd2.text():
+                    QMessageBox.warning(pwd_dlg, "Ошибка", "Пароли пустые или не совпадают.")
+                    return
+                user["password_hash"] = _hash_password(pwd1.text())
+                user["password_plain"] = pwd1.text()
+                _save_users({"users": users})
+                QMessageBox.information(pwd_dlg, "Готово", "Пароль изменён.")
+                pwd_dlg.accept()
+
+            b_ok.clicked.connect(on_save_pwd)
+            b_cancel.clicked.connect(pwd_dlg.reject)
+            QShortcut(QKeySequence("Escape"), pwd_dlg, pwd_dlg.reject)
+            pwd_dlg.resize(340, 220)
+            pwd_dlg.exec()
+
+        def on_send_message() -> None:
+            user, _ = _get_selected_user()
+            if not user:
+                QMessageBox.information(dlg, "Выбор пользователя", "Сначала выберите пользователя в таблице.")
+                return
+            msg_dlg = QDialog(dlg)
+            msg_dlg.setWindowFlags(Qt.WindowType.Dialog | Qt.WindowType.FramelessWindowHint)
+            msg_dlg.setStyleSheet(HELP_DIALOG_STYLE)
+            mly = QVBoxLayout(msg_dlg)
+            mly.setContentsMargins(0, 0, 0, 0)
+            mly.setSpacing(0)
+            mly.addWidget(DialogTitleBar(msg_dlg, "Сообщение пользователю"))
+            mcontent = QWidget()
+            mcly = QVBoxLayout(mcontent)
+            mcly.setContentsMargins(12, 8, 12, 12)
+            mcly.addWidget(QLabel(f"Сообщение для {user.get('username')}:"))
+            text_edit = QTextEdit()
+            mcly.addWidget(text_edit)
+            mrow = QHBoxLayout()
+            b_ok = QPushButton("Отправить")
+            b_cancel = QPushButton("Отмена")
+            mrow.addStretch(1)
+            mrow.addWidget(b_cancel)
+            mrow.addWidget(b_ok)
+            mcly.addLayout(mrow)
+            mly.addWidget(mcontent)
+
+            def on_send() -> None:
+                text = text_edit.toPlainText().strip()
+                if not text:
+                    QMessageBox.warning(msg_dlg, "Ошибка", "Текст сообщения не может быть пустым.")
+                    return
+                msgs = user.setdefault("messages", [])
+                msgs.append({"text": text, "read": False})
+                _save_users({"users": users})
+                QMessageBox.information(msg_dlg, "Готово", "Сообщение сохранено для пользователя.")
+                msg_dlg.accept()
+
+            b_ok.clicked.connect(on_send)
+            b_cancel.clicked.connect(msg_dlg.reject)
+            QShortcut(QKeySequence("Escape"), msg_dlg, msg_dlg.reject)
+            msg_dlg.resize(380, 260)
+            msg_dlg.exec()
+
+        def on_show_password() -> None:
+            user, _ = _get_selected_user()
+            if not user:
+                QMessageBox.information(dlg, "Выбор пользователя", "Сначала выберите пользователя в таблице.")
+                return
+            pwd = user.get("password_plain")
+            if not pwd:
+                QMessageBox.information(
+                    dlg,
+                    "Пароль недоступен",
+                    "Для этого пользователя пароль сохранён только в виде хэша.\n"
+                    "Вы можете задать новый пароль через кнопку с ключом.",
+                )
+                return
+            QMessageBox.information(dlg, "Текущий пароль", f"Пароль пользователя {user.get('username')}:\n\n{pwd}")
+
+        def on_delete_user() -> None:
+            user, row = _get_selected_user()
+            if not user:
+                QMessageBox.information(dlg, "Выбор пользователя", "Сначала выберите пользователя в таблице.")
+                return
+            username = user.get("username")
+            # Не даём удалить себя и базового админа
+            if username == cu.username or username == "Delbraun":
+                QMessageBox.warning(dlg, "Нельзя удалить", "Нельзя удалить текущего администратора.")
+                return
+            reply = QMessageBox.question(
+                dlg,
+                "Удалить пользователя",
+                f"Точно удалить пользователя '{username}'?\nЭто действие нельзя отменить.",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            if reply != QMessageBox.Yes:
+                return
+            users.pop(row)
+            _save_users({"users": users})
+            table.removeRow(row)
+
+        from PySide6.QtWidgets import QInputDialog
+
+        def on_create_user() -> None:
+            # Открываем регистрацию и обновляем таблицу после закрытия
+            self._show_register_dialog()
+            _refresh_users_from_file()
+
+        btn_create.clicked.connect(on_create_user)
+        btn_tokens.clicked.connect(on_change_tokens)
+        btn_block.clicked.connect(on_toggle_block)
+        btn_password.clicked.connect(on_change_password)
+        btn_message.clicked.connect(on_send_message)
+        btn_delete.clicked.connect(on_delete_user)
+        btn_show_password.clicked.connect(on_show_password)
+
+        def _sync_block_button_for_selection() -> None:
+            user, _ = _get_selected_user()
+            if not user:
+                btn_block.setEnabled(False)
+                return
+            btn_block.setEnabled(True)
+            try:
+                if user.get("is_blocked"):
+                    btn_block.setIcon(load_phosphor_icon("Lock_Open", 16))
+                    btn_block.setToolTip("Разблокировать пользователя")
+                else:
+                    btn_block.setIcon(load_phosphor_icon("Lock", 16))
+                    btn_block.setToolTip("Блокировать пользователя")
+            except Exception:
+                pass
+
+        table.currentCellChanged.connect(lambda *_: _sync_block_button_for_selection())
+        _sync_block_button_for_selection()
+
+        QShortcut(QKeySequence("Escape"), dlg, dlg.reject)
+        dlg.resize(600, 380)
+        dlg.exec()
+
+    def _on_tray_activated(self, reason: QSystemTrayIcon.ActivationReason) -> None:
+        """Клик по иконке в трее: двойной клик — показать окно."""
+        if reason == QSystemTrayIcon.ActivationReason.DoubleClick:
+            self._tray_show_window()
+
+    def _check_for_updates_on_startup(self) -> None:
+        """Проверка обновлений при запуске: при наличии новой версии показывается попап слева снизу."""
+        if not hasattr(self, "_network_manager"):
+            self._network_manager = QNetworkAccessManager(self)
+        request = QNetworkRequest(QUrl(GITHUB_RELEASES_API))
+        request.setRawHeader(b"User-Agent", b"WboBAMP-Updater/1.0")
+        reply = self._network_manager.get(request)
+        reply.finished.connect(lambda: self._on_startup_update_check_finished(reply))
+
+    def _on_startup_update_check_finished(self, reply: QNetworkReply) -> None:
+        """Обработка ответа проверки обновлений при запуске: если есть новая версия — показать попап."""
+        try:
+            if reply.error() != QNetworkReply.NetworkError.NoError:
+                reply.deleteLater()
+                return
+            data = reply.readAll().data()
+            reply.deleteLater()
+            doc = json.loads(data.decode("utf-8"))
+            tag_name = (doc.get("tag_name") or "").strip()
+            latest = self._parse_version(tag_name)
+            current = self._parse_version(APP_VERSION)
+            if latest > current:
+                QTimer.singleShot(0, lambda: self._show_update_available_popup(doc))
+        except (json.JSONDecodeError, KeyError, UnicodeDecodeError):
+            try:
+                reply.deleteLater()
+            except Exception:
+                pass
+
+    def _show_update_available_popup(self, release_doc: dict) -> None:
+        """Стильное окно «Доступно обновление» слева снизу: иконка, текст, кнопка «Обновить», крестик. Закрытие на крестик — при следующем запуске уведомление появится снова."""
+        tag_name = (release_doc.get("tag_name") or "").strip()
+        body = (release_doc.get("body") or "").strip()
+        first_line = body.split("\n")[0][:80] if body else ""
+
+        dlg = QDialog(self)
+        dlg.setWindowFlags(
+            Qt.WindowType.Dialog
+            | Qt.WindowType.FramelessWindowHint
+            | Qt.WindowType.WindowStaysOnTopHint
+            | Qt.WindowType.Tool
+        )
+        dlg.setStyleSheet(UPDATE_AVAILABLE_POPUP_STYLE)
+        dlg.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, False)
+        layout = QHBoxLayout(dlg)
+        layout.setContentsMargins(14, 12, 10, 12)
+        layout.setSpacing(12)
+
+        if APP_ICON_PATH.exists():
+            icon_lbl = QLabel()
+            icon_lbl.setFixedSize(40, 40)
+            pix = QPixmap(str(APP_ICON_PATH)).scaled(40, 40, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            icon_lbl.setPixmap(pix)
+            icon_lbl.setStyleSheet("background: transparent;")
+            layout.addWidget(icon_lbl)
+
+        text_block = QFrame()
+        text_block.setObjectName("updatePopupTextBlock")
+        text_ly = QVBoxLayout(text_block)
+        text_ly.setContentsMargins(10, 8, 10, 8)
+        text_ly.setSpacing(2)
+        title_lbl = QLabel(f"Доступна версия {tag_name}")
+        title_lbl.setObjectName("updatePopupTitle")
+        text_ly.addWidget(title_lbl)
+        if first_line:
+            sub_lbl = QLabel(first_line + ("…" if len((body or "").split("\n")[0]) > 80 else ""))
+            sub_lbl.setObjectName("updatePopupText")
+            sub_lbl.setWordWrap(True)
+            sub_lbl.setMaximumWidth(280)
+            text_ly.addWidget(sub_lbl)
+        layout.addWidget(text_block, 1)
+
+        btn_update = QPushButton("Обновить")
+        btn_update.setObjectName("updatePopupBtn")
+
+        def _do_update() -> None:
+            dlg.accept()
+            self._start_self_update(release_doc)
+
+        btn_update.clicked.connect(_do_update)
+
+        btn_close = QPushButton("✕")
+        btn_close.setObjectName("updatePopupClose")
+        btn_close.setFixedSize(28, 28)
+        btn_close.clicked.connect(dlg.reject)
+
+        layout.addWidget(btn_update)
+        layout.addWidget(btn_close)
+
+        dlg.setFixedHeight(72)
+        dlg.setMinimumWidth(380)
+        dlg.setMaximumWidth(420)
+        # Размещаем внутри окна приложения: слева снизу (24 px от краёв)
+        margin = 24
+        popup_h = dlg.height()
+        local_bottom_left = QPoint(margin, self.height() - margin - popup_h)
+        global_pos = self.mapToGlobal(local_bottom_left)
+        dlg.move(global_pos)
+        QShortcut(QKeySequence("Escape"), dlg, dlg.reject)
+        dlg.show()
+        self._update_available_popup = dlg
 
     # --- Перезапуск приложения (используется после установки FFmpeg) ---
     def _restart_app(self) -> None:
@@ -894,35 +1981,77 @@ class MainWindow(QMainWindow):
         if self.video_list.count() == 0:
             parts.append("нет видео")
         else:
-            parts.append(f"видео: {self.video_list.count()}")
+            video_count = sum(
+                1 for i in range(self.video_list.count())
+                if self.video_list.item(i) and self.video_list.item(i).data(Qt.UserRole)
+            )
+            parts.append(f"видео: {video_count}")
         self.set_status_state("  •  ".join(parts) if parts else "Готов")
 
     def load_video_list(self) -> None:
-        """Загрузка списка видео из папки Assets/video."""
+        """Загрузка списка видео из папки Assets/video. Видео в корне — вверху без категории; подпапки — категории с роликами внутри."""
         video_dir = BASE_DIR / "Assets" / "video"
         self.video_list.clear()
         if not video_dir.exists():
             self._update_status_state()
             return
 
-        for p in sorted(video_dir.iterdir()):
-            if p.suffix.lower() == ".mp4":
-                item = QListWidgetItem(p.name)
+        VIDEO_EXT = (".mp4",)
+
+        # 1. Видео прямо в Assets/video — вверху списка, без категории
+        root_files = sorted(
+            [p for p in video_dir.iterdir() if p.is_file() and p.suffix.lower() in VIDEO_EXT],
+            key=lambda p: p.name.lower(),
+        )
+        for p in root_files:
+            item = QListWidgetItem(p.name)
+            item.setData(Qt.UserRole, str(p.resolve()))
+            self.video_list.addItem(item)
+
+        # 2. Подпапки = категории: заголовок + видео внутри
+        subdirs = sorted(
+            [p for p in video_dir.iterdir() if p.is_dir()],
+            key=lambda p: p.name.lower(),
+        )
+        for subdir in subdirs:
+            header = QListWidgetItem(f"  — {subdir.name} —")
+            header.setData(Qt.UserRole, None)
+            header.setFlags(Qt.ItemFlag.ItemIsEnabled)
+            header.setForeground(QColor("#8b949e"))
+            font = header.font()
+            font.setBold(True)
+            header.setFont(font)
+            self.video_list.addItem(header)
+            for p in sorted(
+                [x for x in subdir.iterdir() if x.is_file() and x.suffix.lower() in VIDEO_EXT],
+                key=lambda x: x.name.lower(),
+            ):
+                item = QListWidgetItem(f"    {p.name}")
                 item.setData(Qt.UserRole, str(p.resolve()))
                 self.video_list.addItem(item)
 
+        # Выбрать текущее видео или первый доступный ролик (не заголовок)
         if self.video_list.count() > 0:
             if self.global_video_path:
                 path_str = str(Path(self.global_video_path).resolve())
                 for i in range(self.video_list.count()):
-                    if self.video_list.item(i).data(Qt.UserRole) == path_str:
+                    vi = self.video_list.item(i)
+                    if vi and vi.data(Qt.UserRole) == path_str:
                         self.video_list.setCurrentRow(i)
                         break
                 else:
-                    self.video_list.setCurrentRow(0)
+                    self._video_list_select_first_playable()
             else:
-                self.video_list.setCurrentRow(0)
+                self._video_list_select_first_playable()
         self._update_status_state()
+
+    def _video_list_select_first_playable(self) -> None:
+        """Выбрать первую строку списка видео, которая является роликом (не заголовок категории)."""
+        for i in range(self.video_list.count()):
+            vi = self.video_list.item(i)
+            if vi and vi.data(Qt.UserRole):
+                self.video_list.setCurrentRow(i)
+                return
 
     def _build_ui(self) -> None:
         """Современный интерфейс: кастомный заголовок, удобные панели, акцент на экспорт."""
@@ -949,6 +2078,10 @@ class MainWindow(QMainWindow):
         self.status_name_label = QLabel(f"Wbo BAMP  |  v{APP_VERSION}")
         self.status_name_label.setObjectName("statusName")
         status_layout.addWidget(self.status_name_label)
+        # Показ токенов и пользователя
+        self.status_user_label = QLabel("")
+        self.status_user_label.setObjectName("statusState")
+        status_layout.addWidget(self.status_user_label)
         status_layout.addStretch(1)
         self.status_state_label = QLabel("Готов")
         self.status_state_label.setObjectName("statusState")
@@ -1076,7 +2209,7 @@ class MainWindow(QMainWindow):
         video_header.addWidget(lbl_video)
         video_header.addStretch(1)
         btn_refresh_videos = QPushButton()
-        btn_refresh_videos.setToolTip("Обновить список")
+        btn_refresh_videos.setToolTip("Обновить список видео (Ctrl+R)")
         btn_refresh_videos.setIcon(load_phosphor_icon("arrows-clock", 12))
         btn_refresh_videos.setIconSize(QSize(12, 12))
         btn_refresh_videos.setProperty("class", "iconOnly accent")
@@ -1097,7 +2230,8 @@ class MainWindow(QMainWindow):
         res_row.addWidget(self.preview_mode_combo)
         video_pl.addLayout(res_row)
         self.video_list = QListWidget()
-        self.video_list.setMaximumHeight(100)
+        self.video_list.setMinimumHeight(180)
+        self.video_list.setMaximumHeight(320)
         self.video_list.currentItemChanged.connect(self.on_video_selected)
         video_pl.addWidget(self.video_list)
         self.chk_single_video = QCheckBox("Один ролик для всех карточек")
@@ -1107,23 +2241,13 @@ class MainWindow(QMainWindow):
         self.lbl_global_video = QLabel("Не выбрано")
         self.lbl_global_video.setObjectName("stepHint")
         self.lbl_global_video.setWordWrap(True)
-        video_pl.addWidget(self.lbl_global_video)
         right_layout.addWidget(video_panel)
 
-        card_panel = QFrame()
-        card_panel.setObjectName("panel")
-        card_pl = QVBoxLayout(card_panel)
-        card_pl.setSpacing(4)
-        card_pl.addWidget(QLabel("Текущая карточка"))
+        # Метки для внутреннего использования (не показываем блок «Текущая карточка» на экране)
         self.lbl_selected_image = QLabel("—")
         self.lbl_selected_image.setObjectName("stepHint")
-        self.lbl_selected_image.setWordWrap(True)
-        card_pl.addWidget(self.lbl_selected_image)
         self.lbl_selected_video = QLabel("Видео: общее")
         self.lbl_selected_video.setObjectName("stepHint")
-        self.lbl_selected_video.setWordWrap(True)
-        card_pl.addWidget(self.lbl_selected_video)
-        right_layout.addWidget(card_panel)
 
         curve_panel = QFrame()
         curve_panel.setObjectName("panel")
@@ -1191,6 +2315,35 @@ class MainWindow(QMainWindow):
         """Меню сверху и горячие клавиши."""
         # Меню
         menu_bar = self.menuBar()
+
+        # Меню пользователя: регистрация / вход / выход / профиль
+        user_menu = menu_bar.addMenu("Пользователь")
+
+        act_login = QAction("Войти", self)
+        act_login.triggered.connect(self._show_login_dialog)
+        user_menu.addAction(act_login)
+
+        act_register = QAction("Регистрация", self)
+        act_register.triggered.connect(self._show_register_dialog)
+        user_menu.addAction(act_register)
+
+        self.act_profile = QAction("Профиль", self)
+        self.act_profile.triggered.connect(self._show_profile_dialog)
+        user_menu.addAction(self.act_profile)
+
+        self.act_logout = QAction("Выйти", self)
+        self.act_logout.triggered.connect(self._logout_current_user)
+        user_menu.addAction(self.act_logout)
+
+        user_menu.addSeparator()
+
+        # Заглушка под будущую админ-панель
+        self.act_admin_panel = QAction("Админ-панель", self)
+        self.act_admin_panel.triggered.connect(self._show_admin_panel)
+        user_menu.addAction(self.act_admin_panel)
+        # По умолчанию прячем пункт админ-панели до входа администратора
+        self.act_admin_panel.setVisible(False)
+
         view_menu = menu_bar.addMenu("Вид")
         self.act_view_left = QAction("Левая панель (карточки)", self, checkable=True, checked=True)
         self.act_view_left.triggered.connect(self._toggle_left_panel)
@@ -1238,12 +2391,17 @@ class MainWindow(QMainWindow):
         act_author.triggered.connect(self._show_author)
         help_menu.addAction(act_author)
 
+        act_check_updates = QAction("Проверить обновление", self)
+        act_check_updates.triggered.connect(self._check_for_updates)
+        help_menu.addAction(act_check_updates)
+
         # Горячие клавиши: один источник правды для регистрации и для «О программе»
         self._hotkey_specs: list[tuple[str, object]] = [
             ("Ctrl+O", self.on_load_images_clicked, "загрузить изображения из папки"),
             ("Ctrl+E", self.on_export_current_clicked, "экспорт карточки, выбранной в превью"),
             ("Ctrl+Shift+E", self.on_export_clicked, "экспорт выбранных или всех карточек в MP4"),
             ("Ctrl+J", self.on_duplicate_selected_clicked, "дублировать выбранные карточки (с настройками)"),
+            ("Ctrl+R", self.on_refresh_videos_clicked, "обновить список видео"),
             ("Delete", self.on_delete_selected_clicked, "удалить выбранные карточки"),
             ("Space", self._toggle_preview_play_pause, "пауза / воспроизведение превью"),
         ]
@@ -1512,6 +2670,305 @@ class MainWindow(QMainWindow):
         dlg.resize(420, 400)
         SoundPlayer.play(SOUND_DIALOG)
         dlg.exec()
+
+    def _parse_version(self, s: str) -> tuple[int, ...]:
+        """Преобразует строку версии (например 'v0.1.2.2.1' или '0.1.2.2.1') в кортеж чисел."""
+        s = s.strip().lstrip("vV")
+        try:
+            return tuple(int(x) for x in s.split(".") if x.isdigit())
+        except (ValueError, AttributeError):
+            return (0,)
+
+    def _check_for_updates(self) -> None:
+        """Проверка обновлений через GitHub Releases API. Результат показывается в диалоге."""
+        SoundPlayer.play(SOUND_CLICK)
+        if not hasattr(self, "_network_manager"):
+            self._network_manager = QNetworkAccessManager(self)
+        request = QNetworkRequest(QUrl(GITHUB_RELEASES_API))
+        request.setRawHeader(b"User-Agent", b"WboBAMP-Updater/1.0")
+        reply = self._network_manager.get(request)
+        reply.finished.connect(lambda: self._on_update_check_finished(reply))
+
+    def _on_update_check_finished(self, reply: QNetworkReply) -> None:
+        """Обработка ответа API GitHub: показать диалог «есть обновление» / «уже последняя» / «ошибка»."""
+        try:
+            reply.deleteLater()
+            if reply.error() != QNetworkReply.NetworkError.NoError:
+                self._show_update_dialog(
+                    False,
+                    None,
+                    None,
+                    "Не удалось проверить обновления.\nПроверьте подключение к интернету.",
+                    release_doc=None,
+                )
+                return
+            data = reply.readAll().data()
+            doc = json.loads(data.decode("utf-8"))
+            tag_name = doc.get("tag_name") or ""
+            html_url = doc.get("html_url") or "https://github.com/divangames/WbO-BUMP/releases"
+            body = (doc.get("body") or "").strip() or None
+            latest = self._parse_version(tag_name)
+            current = self._parse_version(APP_VERSION)
+            if latest > current:
+                msg = (
+                    f"Доступна новая версия: {tag_name}\n\n"
+                    f"У вас установлена версия {APP_VERSION}.\n\n"
+                    "«Загрузить и применить» — программа сама скачает обновлённые файлы и применит их.\n"
+                    "Либо откройте страницу загрузки и установите обновление вручную."
+                )
+                if body:
+                    msg += "\n\n" + (body[:400] + "…" if len(body) > 400 else body)
+                self._show_update_dialog(True, tag_name, html_url, msg, release_doc=doc)
+            else:
+                self._show_update_dialog(
+                    False,
+                    None,
+                    None,
+                    "У вас установлена последняя версия.\n\nВерсия: " + APP_VERSION,
+                    release_doc=None,
+                )
+        except (json.JSONDecodeError, KeyError, UnicodeDecodeError):
+            self._show_update_dialog(
+                False,
+                None,
+                None,
+                "Не удалось обработать ответ сервера.\nПроверьте обновления вручную на странице релизов.",
+                release_doc=None,
+            )
+
+    def _show_update_dialog(
+        self,
+        has_update: bool,
+        version: str | None,
+        url: str | None,
+        message: str,
+        release_doc: dict | None = None,
+    ) -> None:
+        """Показать диалог результата проверки обновлений."""
+        dlg = QDialog(self)
+        dlg.setWindowFlags(Qt.WindowType.Dialog | Qt.WindowType.FramelessWindowHint)
+        dlg.setStyleSheet(HELP_DIALOG_STYLE)
+        layout = QVBoxLayout(dlg)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        layout.addWidget(DialogTitleBar(dlg, "Проверка обновлений"))
+        content = QWidget()
+        content_ly = QVBoxLayout(content)
+        content_ly.setContentsMargins(12, 8, 12, 12)
+        lbl = QLabel(message)
+        lbl.setWordWrap(True)
+        lbl.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        content_ly.addWidget(lbl)
+        btn_row = QHBoxLayout()
+        btn_row.addStretch(1)
+        if has_update and release_doc and self._get_update_zip_url(release_doc):
+            btn_apply = QPushButton("Загрузить и применить")
+            btn_apply.clicked.connect(dlg.accept)
+            btn_apply.clicked.connect(lambda: self._start_self_update(release_doc))
+            btn_row.addWidget(btn_apply)
+        if has_update and url:
+            btn_open = QPushButton("Открыть страницу загрузки")
+            btn_open.clicked.connect(lambda: QDesktopServices.openUrl(QUrl(url)))
+            btn_open.clicked.connect(dlg.accept)
+            btn_row.addWidget(btn_open)
+        btn_ok = QPushButton("ОК")
+        btn_ok.clicked.connect(dlg.accept)
+        btn_row.addWidget(btn_ok)
+        content_ly.addLayout(btn_row)
+        layout.addWidget(content)
+        QShortcut(QKeySequence("Escape"), dlg, dlg.reject)
+        dlg.resize(500, 340)
+        SoundPlayer.play(SOUND_DIALOG)
+        dlg.exec()
+
+    def _get_update_zip_url(self, release_doc: dict) -> str | None:
+        """Находит в релизе ассет с ZIP для автообновления. Приоритет: update*.zip → любой .zip кроме установщика → любой .zip."""
+        assets = release_doc.get("assets") or []
+        for asset in assets:
+            name = (asset.get("name") or "").lower()
+            if "update" in name and name.endswith(".zip"):
+                return asset.get("browser_download_url") or None
+        for asset in assets:
+            name = (asset.get("name") or "").lower()
+            if name.endswith(".zip") and "setup" not in name and "installer" not in name:
+                return asset.get("browser_download_url") or None
+        # Любой ZIP в релизе подойдёт для автообновления (например WboBAMP_v0.1.2.3.zip)
+        for asset in assets:
+            name = (asset.get("name") or "").lower()
+            if name.endswith(".zip"):
+                return asset.get("browser_download_url") or None
+        return None
+
+    def _get_update_installer_url(self, release_doc: dict) -> str | None:
+        """Находит в релизе установщик .exe (если нет ZIP — обновление через запуск установщика)."""
+        for asset in release_doc.get("assets") or []:
+            name = (asset.get("name") or "").lower()
+            if name.endswith(".exe"):
+                return asset.get("browser_download_url") or None
+        return None
+
+    def _start_self_update(self, release_doc: dict) -> None:
+        """Скачивает обновление (ZIP или установщик .exe) из релиза и применяет/запускает его."""
+        download_url = self._get_update_zip_url(release_doc)
+        use_installer = False
+        if not download_url:
+            download_url = self._get_update_installer_url(release_doc)
+            use_installer = bool(download_url)
+        if not download_url:
+            QMessageBox.warning(
+                self,
+                "Обновление",
+                "В этом релизе нет пакета для автообновления.\nИспользуйте «Открыть страницу загрузки» и установите обновление вручную.",
+            )
+            return
+        # Прогресс-диалог
+        prog_dlg = QDialog(self)
+        prog_dlg.setWindowFlags(Qt.WindowType.Dialog | Qt.WindowType.FramelessWindowHint)
+        prog_dlg.setStyleSheet(HELP_DIALOG_STYLE)
+        prog_layout = QVBoxLayout(prog_dlg)
+        prog_layout.setContentsMargins(0, 0, 0, 0)
+        prog_layout.setSpacing(0)
+        prog_layout.addWidget(DialogTitleBar(prog_dlg, "Загрузка обновления"))
+        prog_content = QVBoxLayout()
+        prog_content.setContentsMargins(12, 12, 12, 12)
+        self._update_progress_label = QLabel("Подготовка…")
+        self._update_progress_bar = QProgressBar()
+        self._update_progress_bar.setRange(0, 0)  # indeterminate
+        prog_content.addWidget(self._update_progress_label)
+        prog_content.addWidget(self._update_progress_bar)
+        prog_layout.addLayout(prog_content)
+        prog_dlg.setMinimumWidth(360)
+        prog_dlg.show()
+        QApplication.processEvents()
+
+        request = QNetworkRequest(QUrl(download_url))
+        request.setRawHeader(b"User-Agent", b"WboBAMP-Updater/1.0")
+        if not hasattr(self, "_network_manager"):
+            self._network_manager = QNetworkAccessManager(self)
+        reply = self._network_manager.get(request)
+        self._update_prog_dlg = prog_dlg
+        self._update_is_installer = use_installer
+        suffix = ".exe" if use_installer else ".zip"
+        self._update_temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
+        self._update_temp_file.close()
+        reply.downloadProgress.connect(
+            lambda received, total: self._on_update_download_progress(received, total, prog_dlg)
+        )
+        reply.finished.connect(lambda: self._on_update_download_finished(reply, prog_dlg))
+
+    def _on_update_download_progress(
+        self, received: int, total: int, prog_dlg: QDialog
+    ) -> None:
+        if total <= 0:
+            return
+        if hasattr(self, "_update_progress_bar") and self._update_progress_bar:
+            self._update_progress_bar.setRange(0, total)
+            self._update_progress_bar.setValue(received)
+        if hasattr(self, "_update_progress_label") and self._update_progress_label:
+            mb = total / (1024 * 1024)
+            self._update_progress_label.setText(f"Загрузка… {received / (1024*1024):.2f} / {mb:.2f} МБ")
+
+    def _on_update_download_finished(self, reply: QNetworkReply, prog_dlg: QDialog) -> None:
+        """После загрузки — для ZIP: распаковать и применить; для .exe — запустить установщик и выйти."""
+        temp_path = getattr(self, "_update_temp_file", None) and self._update_temp_file.name
+        is_installer = getattr(self, "_update_is_installer", False)
+        try:
+            reply.deleteLater()
+            if reply.error() != QNetworkReply.NetworkError.NoError:
+                prog_dlg.reject()
+                QMessageBox.warning(
+                    self,
+                    "Ошибка загрузки",
+                    "Не удалось скачать обновление.\nПопробуйте «Открыть страницу загрузки» и установите вручную.",
+                )
+                return
+            if not temp_path:
+                prog_dlg.reject()
+                return
+            data = reply.readAll().data()
+            Path(temp_path).write_bytes(data)
+        except Exception as e:
+            prog_dlg.reject()
+            QMessageBox.warning(self, "Ошибка", f"Ошибка при сохранении загрузки: {e}")
+            return
+
+        if is_installer:
+            prog_dlg.accept()
+            try:
+                os.startfile(temp_path)
+            except Exception:
+                try:
+                    QProcess.startDetached(temp_path, [])
+                except Exception:
+                    QMessageBox.warning(
+                        self,
+                        "Обновление",
+                        "Установщик загружен, но не удалось запустить.\nОткройте папку с загрузками и запустите файл вручную.",
+                    )
+                    return
+            QMessageBox.information(
+                self,
+                "Обновление",
+                "Установщик запущен. Завершите установку и перезапустите приложение.",
+            )
+            QCoreApplication.quit()
+            return
+
+        # ZIP: распаковка и копирование
+        if hasattr(self, "_update_progress_label"):
+            self._update_progress_label.setText("Применение файлов…")
+        if hasattr(self, "_update_progress_bar"):
+            self._update_progress_bar.setRange(0, 0)
+        QApplication.processEvents()
+
+        try:
+            applied = self._apply_update_zip(Path(temp_path))
+            prog_dlg.accept()
+            QMessageBox.information(
+                self,
+                "Обновление установлено",
+                f"Обновлено файлов: {applied}.\nПриложение перезапустится через 2 секунды.",
+            )
+            QTimer.singleShot(2000, self._restart_app)
+        except Exception as e:
+            prog_dlg.reject()
+            QMessageBox.warning(self, "Ошибка применения", f"Не удалось применить обновление: {e}")
+        finally:
+            try:
+                Path(temp_path).unlink(missing_ok=True)
+            except Exception:
+                pass
+
+    def _apply_update_zip(self, zip_path: Path) -> int:
+        """Распаковывает ZIP во временную папку и копирует файлы в BASE_DIR. Не перезаписывает запущенный exe. Возвращает число применённых файлов."""
+        applied = 0
+        exe_name = Path(sys.executable).name if getattr(sys, "frozen", False) else None
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with zipfile.ZipFile(zip_path, "r") as zf:
+                zf.extractall(tmpdir)
+            tmp = Path(tmpdir)
+            # Если в архиве одна верхняя папка (например WboBAMP/) — копируем её содержимое в BASE_DIR
+            entries = list(tmp.iterdir())
+            if len(entries) == 1 and entries[0].is_dir():
+                root = entries[0]
+            else:
+                root = tmp
+            for f in root.rglob("*"):
+                if not f.is_file():
+                    continue
+                rel = f.relative_to(root)
+                if exe_name and rel.name == exe_name:
+                    continue
+                if ".." in str(rel) or rel.is_absolute():
+                    continue
+                dest = BASE_DIR / rel
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                try:
+                    shutil.copy2(f, dest)
+                    applied += 1
+                except OSError:
+                    pass
+        return applied
 
     # ====================== Работа с изображениями ==========================
 
@@ -2207,6 +3664,22 @@ class MainWindow(QMainWindow):
         if not self.items:
             QMessageBox.information(self, "Нет карточек", "Сначала загрузите изображения.")
             return
+        # Инициализируем текущего пользователя (гость по умолчанию)
+        self._ensure_user_loaded()
+
+        # Если пользователь заблокирован (мог быть заблокирован после входа) — запрещаем экспорт
+        if (
+            self.current_user is not None
+            and self.current_user.username not in ("", "guest")
+            and self.current_user.is_blocked
+        ):
+            QMessageBox.warning(
+                self,
+                "Доступ запрещён",
+                "Ваш аккаунт заблокирован администратором.\nЭкспорт недоступен.",
+            )
+            return
+
         # Определяем, какие карточки экспортировать: если есть выделение —
         # экспортируем только выбранные, иначе все.
         target_items = self._get_items_to_export()
@@ -2218,6 +3691,69 @@ class MainWindow(QMainWindow):
             )
             return
 
+        # Банки: один успешный экспорт одной карточки = 5 банок
+        required_banks = len(target_items) * 5
+        while True:
+            cu = self.current_user
+            if cu is None:
+                self._ensure_user_loaded()
+                cu = self.current_user
+            if cu is None:
+                return
+
+            # Заблокированный пользователь — запрещаем экспорт
+            if cu.username not in ("", "guest") and cu.is_blocked:
+                QMessageBox.warning(
+                    self,
+                    "Доступ запрещён",
+                    "Ваш аккаунт заблокирован администратором.\nЭкспорт недоступен.",
+                )
+                return
+
+            # Если банок не хватает — предлагаем войти/зарегистрироваться
+            if cu.tokens < required_banks:
+                if cu.username == "guest":
+                    msg = QMessageBox(self)
+                    msg.setIcon(QMessageBox.Information)
+                    msg.setWindowTitle("Недостаточно банок")
+                    msg.setText(
+                        f"Для экспорта {len(target_items)} карточек нужно {required_banks} {_bank_word(required_banks)} "
+                        f"(по 5 {_bank_word(5)} за карточку).\n"
+                        f"У вас сейчас: {cu.tokens} {_bank_word(cu.tokens)}.\n\n"
+                        "Зарегистрироваться или войти?"
+                    )
+                    btn_register = msg.addButton("Регистрация", QMessageBox.AcceptRole)
+                    btn_login = msg.addButton("Войти", QMessageBox.ActionRole)
+                    btn_cancel = msg.addButton("Отмена", QMessageBox.RejectRole)
+                    msg.exec()
+                    clicked = msg.clickedButton()
+                    if clicked == btn_register:
+                        self._show_register_dialog()
+                        # после регистрации пользователь может сразу войти
+                        self._show_login_dialog()
+                        self._ensure_user_loaded()
+                        continue
+                    if clicked == btn_login:
+                        self._show_login_dialog()
+                        self._ensure_user_loaded()
+                        continue
+                    if clicked == btn_cancel:
+                        return
+                    return
+
+                QMessageBox.warning(
+                    self,
+                    "Недостаточно банок",
+                    f"Для экспорта {len(target_items)} карточек требуется {required_banks} {_bank_word(required_banks)} "
+                    f"(по 5 {_bank_word(5)} за карточку).\n"
+                    f"У вас доступно: {cu.tokens} {_bank_word(cu.tokens)}.\n\n"
+                    "Обратитесь к администратору для пополнения.",
+                )
+                return
+
+            # Банок достаточно — продолжаем экспорт
+            break
+
         if not self.global_video_path and not any(i.video_path for i in target_items):
             QMessageBox.information(
                 self,
@@ -2225,6 +3761,8 @@ class MainWindow(QMainWindow):
                 "Нужно выбрать хотя бы одно видео (общее или для отдельных карточек).",
             )
             return
+
+        # (проверка банок выше)
 
         start_dir = self.config.get("last_export_path", str(Path.cwd()))
         export_dir = QFileDialog.getExistingDirectory(
@@ -2253,7 +3791,7 @@ class MainWindow(QMainWindow):
             msg.setText(
                 "Для кодека H.264 нужен установленный FFmpeg.\n\n"
                 "Можно установить его командой:\n"
-                "winget install Gyan.FFmpeg\n\n"
+                "winget install Gyan.FFmpeg --source winget\n\n"
                 "Установить FFmpeg сейчас через PowerShell?\n"
                 "После установки можно перезапустить приложение."
             )
@@ -2268,7 +3806,7 @@ class MainWindow(QMainWindow):
                 try:
                     # Открываем PowerShell от имени обычного пользователя
                     os.system(
-                        'start "" powershell -NoExit -Command "winget install Gyan.FFmpeg"'
+                        'start "" powershell -NoExit -Command "winget install Gyan.FFmpeg --source winget"'
                     )
                 except Exception:
                     pass
@@ -2303,10 +3841,10 @@ class MainWindow(QMainWindow):
         errors: list[str] = []
         success_count = 0
 
-        # Окно прогресса экспорта (кастомная шапка, перетаскивание)
+        # Окно прогресса экспорта (немодальное — можно свернуть программу во время экспорта)
         progress_dialog = QDialog(self)
         progress_dialog.setWindowTitle("Экспорт видео-карточек")
-        progress_dialog.setWindowModality(Qt.WindowModal)
+        progress_dialog.setWindowModality(Qt.WindowModality.NonModal)
         progress_dialog.setWindowFlags(Qt.WindowType.Dialog | Qt.WindowType.FramelessWindowHint)
         progress_dialog.setStyleSheet(
             "QDialog { background-color: #16181c; border-radius: 6px; }"
@@ -2452,85 +3990,113 @@ class MainWindow(QMainWindow):
 
         progress_dialog.close()
 
-        # Воспроизводим звук по результату, когда общий прогресс уже дошёл до конца
+        # После экспорта: списываем банки за успешные карточки
+        if self.current_user is not None:
+            used_tokens = success_count * 5
+            if used_tokens > 0:
+                if self.current_user.username in ("", "guest"):
+                    # Гость: списание только в памяти
+                    self.current_user.tokens = max(0, int(self.current_user.tokens) - used_tokens)
+                    self._update_user_menu_state()
+                else:
+                    data = _load_users()
+                    u = _find_user(data, self.current_user.username)
+                    if u is not None:
+                        current_tokens = int(u.get("tokens", 0))
+                        new_tokens = max(0, current_tokens - used_tokens)
+                        u["tokens"] = new_tokens
+                        _save_users(data)
+                        # Обновляем локальное состояние
+                        self.current_user.tokens = new_tokens
+                        self._update_user_menu_state()
+
+        # Воспроизводим звук по результату
         if not cancel_requested:
             if errors:
                 SoundPlayer.play(SOUND_EXPORT_ERROR)
             else:
                 SoundPlayer.play(SOUND_EXPORT_READY)
 
-        # Показываем итог в кастомном диалоге с шапкой
+        # Уведомление в стиле приложения: висит в углу экрана до нажатия «Открыть» или «ОК»
+        def _restore_and_open_folder() -> None:
+            self._tray_show_window()
+            try:
+                os.startfile(export_dir)
+            except Exception:
+                pass
+
+        # Дополнительная строка про токены (если пользователь авторизован)
+        tokens_info = ""
+        if (
+            self.current_user is not None
+            and self.current_user.username not in ("", "guest")
+            and success_count > 0
+        ):
+            spent = success_count * 5
+            remaining = self.current_user.tokens
+            tokens_info = (
+                f"\nСписано: {spent} {_bank_word(spent)}. Осталось: {remaining} {_bank_word(remaining)}."
+            )
+
         if errors:
-            msg = f"Успешно экспортировано карточек: {success_count}.\n\n"
-            msg += "Часть карточек не удалось обработать:\n\n"
-            msg += "\n".join(errors)
-            result_dlg = QDialog(self)
-            result_dlg.setWindowFlags(Qt.WindowType.Dialog | Qt.WindowType.FramelessWindowHint)
-            result_dlg.setStyleSheet(
+            msg = (
+                f"Успешно экспортировано карточек: {success_count}."
+                f"{tokens_info}\nЧасть карточек не удалось обработать. Нажмите «Открыть» для деталей."
+            )
+            error_dlg = QDialog(self)
+            error_dlg.setWindowFlags(Qt.WindowType.Dialog | Qt.WindowType.FramelessWindowHint)
+            error_dlg.setStyleSheet(
                 "QDialog { background-color: #16181c; border-radius: 6px; }"
                 "QLabel { color: #e2e8f0; font-size: 12px; background: transparent; }"
                 "QPushButton { background: transparent; color: #e2e8f0; border: 1px solid #475569; border-radius: 4px; padding: 6px 12px; }"
                 "QPushButton:hover { background: rgba(71, 85, 105, 0.5); }"
             )
-            rly = QVBoxLayout(result_dlg)
+            rly = QVBoxLayout(error_dlg)
             rly.setContentsMargins(0, 0, 0, 0)
             rly.setSpacing(0)
-            rly.addWidget(DialogTitleBar(result_dlg, "Экспорт завершён с ошибками"))
+            rly.addWidget(DialogTitleBar(error_dlg, "Экспорт завершён с ошибками"))
             r_content = QWidget()
             r_ly = QVBoxLayout(r_content)
             r_ly.setContentsMargins(12, 8, 12, 12)
-            r_lbl = QLabel(msg)
+            err_msg = (
+                f"Успешно экспортировано карточек: {success_count}.{tokens_info}\n\n"
+                "Часть карточек не удалось обработать:\n\n" + "\n".join(errors)
+            )
+            r_lbl = QLabel(err_msg)
             r_lbl.setWordWrap(True)
             r_ly.addWidget(r_lbl)
             r_btn = QPushButton("ОК")
-            r_btn.clicked.connect(result_dlg.accept)
+            r_btn.clicked.connect(error_dlg.accept)
             r_ly.addWidget(r_btn, alignment=Qt.AlignRight)
             rly.addWidget(r_content)
-            QShortcut(QKeySequence("Escape"), result_dlg, result_dlg.accept)
-            result_dlg.resize(420, 280)
-            SoundPlayer.play(SOUND_DIALOG)
-            result_dlg.exec()
-        else:
-            result_dlg = QDialog(self)
-            result_dlg.setWindowFlags(Qt.WindowType.Dialog | Qt.WindowType.FramelessWindowHint)
-            result_dlg.setStyleSheet(
-                "QDialog { background-color: #16181c; border-radius: 6px; }"
-                "QLabel { color: #e2e8f0; font-size: 12px; background: transparent; }"
-                "QPushButton { background: transparent; color: #e2e8f0; border: 1px solid #475569; border-radius: 4px; padding: 6px 12px; }"
-                "QPushButton:hover { background: rgba(71, 85, 105, 0.5); }"
-                "QPushButton[class=primary] { border-color: #0d7377; color: #0d7377; }"
-                "QPushButton[class=primary]:hover { background: rgba(13, 115, 119, 0.25); border-color: #0e8a8f; color: #0e8a8f; }"
+            QShortcut(QKeySequence("Escape"), error_dlg, error_dlg.accept)
+            error_dlg.resize(420, 280)
+
+            def _on_open_show_errors() -> None:
+                self._tray_show_window()
+                error_dlg.exec()
+
+            self._export_notification = show_export_complete_tray_notification(
+                self,
+                "Экспорт завершён с ошибками",
+                msg,
+                on_open=_on_open_show_errors,
             )
-            rly = QVBoxLayout(result_dlg)
-            rly.setContentsMargins(0, 0, 0, 0)
-            rly.setSpacing(0)
-            rly.addWidget(DialogTitleBar(result_dlg, "Экспорт завершён"))
-            r_content = QWidget()
-            r_ly = QVBoxLayout(r_content)
-            r_ly.setContentsMargins(12, 8, 12, 12)
-            r_ly.addWidget(QLabel(f"Успешно экспортировано карточек: {success_count}."))
-            r_btns = QHBoxLayout()
-            r_btns.addStretch(1)
-            btn_ok = QPushButton("ОК")
-            btn_ok.clicked.connect(result_dlg.accept)
-            btn_open = QPushButton("Открыть папку")
-            btn_open.setProperty("class", "primary")
-            def _open_and_close() -> None:
+        else:
+            def _open_export_folder() -> None:
                 try:
-                    os.startfile(export_dir)
+                    if export_dir:
+                        os.startfile(export_dir)
                 except Exception:
                     pass
-                result_dlg.accept()
-            btn_open.clicked.connect(_open_and_close)
-            r_btns.addWidget(btn_ok)
-            r_btns.addWidget(btn_open)
-            r_ly.addLayout(r_btns)
-            rly.addWidget(r_content)
-            QShortcut(QKeySequence("Escape"), result_dlg, result_dlg.accept)
-            result_dlg.resize(360, 140)
-            SoundPlayer.play(SOUND_DIALOG)
-            SoundPlayer.play(SOUND_EXPORT_READY)
-            result_dlg.exec()
+
+            self._export_notification = show_export_complete_tray_notification(
+                self,
+                "Экспорт завершён",
+                f"Успешно экспортировано карточек: {success_count}.{tokens_info}",
+                on_open=self._tray_show_window,
+                on_open_folder=_open_export_folder,
+            )
 
 
 def screen_blend(base_frame: np.ndarray, overlay_frame: np.ndarray) -> np.ndarray:
@@ -2654,7 +4220,7 @@ def _find_ffmpeg() -> str | None:
             if p.exists():
                 return str(p)
         except Exception:
-            continue
+                continue
 
     return None
 
