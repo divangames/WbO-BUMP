@@ -1,9 +1,13 @@
-# Build
-dist/
+# Build / артефакты
 build/
+dist/
 WBOAnimation/
-*.spec
 installer_output/
+export/
+Source/
+presets/
+bin/
+*.spec
 
 # Python
 __pycache__/
