@@ -70,7 +70,7 @@ from ui_common import DialogTitleBar
 # ВАЖНО: комментарии всегда на русском, не удалять при доработках
 
 # Версия приложения (для статус-бара, «О программе» и сплэша)
-APP_VERSION = "0.1.2.2.1"
+APP_VERSION = "1.2.2.2.a"
 
 # Проверка обновлений: последний релиз на GitHub
 GITHUB_RELEASES_API = "https://api.github.com/repos/divangames/WbO-BUMP/releases/latest"
@@ -187,6 +187,7 @@ def _load_users() -> dict:
                     "password_hash": _hash_password("0211Fenix91!"),
                     "password_plain": "0211Fenix91!",
                     "is_admin": True,
+                    "role": "admin",
                     "is_blocked": False,
                     "tokens": 0,
                     "messages": [],
@@ -206,12 +207,14 @@ def _load_users() -> dict:
                 # Если почему-то нет флага is_admin, включаем его
                 u.setdefault("is_admin", True)
                 u.setdefault("password_plain", "0211Fenix91!")
+                u.setdefault("role", "admin")
         if not has_delbraun:
             data.setdefault("users", []).append(
                 {
                     "username": "Delbraun",
                     "password_hash": _hash_password("0211Fenix91!"),
                     "is_admin": True,
+                    "role": "admin",
                     "is_blocked": False,
                     "tokens": 0,
                     "messages": [],
@@ -242,11 +245,12 @@ def _find_user(data: dict, username: str) -> dict | None:
 class CurrentUser:
     """Текущий авторизованный пользователь."""
 
-    def __init__(self, username: str, is_admin: bool, tokens: int, is_blocked: bool) -> None:
+    def __init__(self, username: str, is_admin: bool, tokens: int, is_blocked: bool, role: str = "user") -> None:
         self.username = username
         self.is_admin = is_admin
         self.tokens = tokens
         self.is_blocked = is_blocked
+        self.role = role
 
 # Единая тёмная тема: один фон, одна рамка, аккуратный вид
 APP_STYLESHEET = """
@@ -485,39 +489,37 @@ APP_STYLESHEET = """
     QSlider::handle:horizontal:pressed {
         background: #8b949e;
     }
+    /* Ползунки кривой — тоньше, аккуратнее */
     QSlider#curveSlider::groove:horizontal {
-        height: 4px;
+        height: 3px;
+        border-radius: 2px;
+    }
+    QSlider#curveSlider::sub-page:horizontal {
+        border-radius: 2px;
+    }
+    QSlider#curveSlider::add-page:horizontal {
+        border-radius: 2px;
     }
     QSlider#curveSlider::handle:horizontal {
-        width: 12px;
-        height: 12px;
+        width: 10px;
+        height: 10px;
         margin: -4px 0;
+        border-radius: 5px;
     }
     QCheckBox {
         color: #e6edf3;
         spacing: 8px;
         font-size: 13px;
     }
+    /* Все чекбоксы — один стиль */
     QCheckBox::indicator {
-        width: 16px;
-        height: 16px;
-        border: 1px solid #2a3038;
-        border-radius: 4px;
-        background: transparent;
-    }
-    QCheckBox::indicator:checked {
-        background: #3d454f;
-        border-color: #4d5a6b;
-    }
-    /* Чекбокс «Один ролик для всех» — явная синяя галочка */
-    QCheckBox#singleVideoCheckbox::indicator {
         width: 18px;
         height: 18px;
         border: 1px solid #2a3038;
         border-radius: 4px;
         background: #1e2329;
     }
-    QCheckBox#singleVideoCheckbox::indicator:checked {
+    QCheckBox::indicator:checked {
         background: #2563eb;
         border-color: #3b82f6;
         image: url("{{CHECK_ICON}}");
@@ -895,6 +897,10 @@ def load_config() -> dict:
             "export_size": "900x1200",
             # целевой FPS экспорта: 24 / 30 / 60
             "export_fps": 60,
+            # True: экспорт по подпапкам по имени карточки
+            "export_group_by_card_folder": True,
+            # True: турбо экспорт (аппаратное кодирование через GPU, если доступно)
+            "export_gpu_turbo": False,
             # Последний вошедший пользователь (для автологина)
             "auth_username": "",
         }
@@ -911,6 +917,8 @@ def load_config() -> dict:
     data.setdefault("export_codec", "h264")
     data.setdefault("export_size", "900x1200")
     data.setdefault("export_fps", 60)
+    data.setdefault("export_group_by_card_folder", True)
+    data.setdefault("export_gpu_turbo", False)
     data.setdefault("auth_username", "")
     return data
 
@@ -1054,6 +1062,8 @@ class MainWindow(QMainWindow):
         self.export_codec: str = self.config.get("export_codec", "h264")
         self.export_size_str: str = self.config.get("export_size", "900x1200")
         self.export_fps: int = int(self.config.get("export_fps", 60) or 60)
+        self.export_group_by_card_folder: bool = bool(self.config.get("export_group_by_card_folder", True))
+        self.export_gpu_turbo: bool = bool(self.config.get("export_gpu_turbo", False))
 
         # Текущее выбранное общее видео для наложения
         self.global_video_path: str | None = None
@@ -1087,7 +1097,11 @@ class MainWindow(QMainWindow):
         if saved_geom and isinstance(saved_geom, QByteArray):
             self.restoreGeometry(saved_geom)
         else:
-            self.resize(1100, 720)
+            self.resize(960, 720)
+
+        # Фиксированная ширина окна: 960px
+        self.setMinimumWidth(960)
+        self.setMaximumWidth(960)
 
         if APP_ICON_PATH.exists():
             self.setWindowIcon(QIcon(str(APP_ICON_PATH)))
@@ -1163,7 +1177,7 @@ class MainWindow(QMainWindow):
         """Простейшая инициализация: если никто не вошёл — работаем как гость."""
         if self.current_user is None:
             # Гость без прав, с начальным пакетом банок
-            self.current_user = CurrentUser(username="guest", is_admin=False, tokens=100, is_blocked=False)
+            self.current_user = CurrentUser(username="guest", is_admin=False, tokens=100, is_blocked=False, role="guest")
         self._update_user_menu_state()
 
     def _try_autologin(self) -> None:
@@ -1188,6 +1202,7 @@ class MainWindow(QMainWindow):
             is_admin=bool(u.get("is_admin")),
             tokens=int(u.get("tokens", 0)),
             is_blocked=bool(u.get("is_blocked")),
+            role=str(u.get("role") or ("admin" if bool(u.get("is_admin")) else "user")),
         )
         self._update_user_menu_state()
 
@@ -1197,32 +1212,47 @@ class MainWindow(QMainWindow):
         has_user = cu is not None and cu.username != "guest"
         self.act_profile.setEnabled(has_user)
         self.act_logout.setEnabled(has_user)
+        # Регистрация/создание пользователей — только админ/модератор
+        role_key = getattr(cu, "role", "guest") if cu is not None else "guest"
+        can_manage_users = bool(cu and cu.username not in ("", "guest") and role_key in ("admin", "moderator"))
+        if hasattr(self, "act_register"):
+            self.act_register.setVisible(can_manage_users)
         # Админ-панель только для админа
         self.act_admin_panel.setVisible(bool(cu and cu.is_admin))
         # Обновляем строку статуса с информацией о пользователе и токенах
         if hasattr(self, "status_user_label"):
-            user_icon = _icon_img_tag("User_01", 14)
-            bank_icon = _icon_img_tag("Cupcake", 14)
             if cu is None or cu.username == "guest":
                 banks = _format_int_spaces(cu.tokens if cu is not None else 100)
                 self.status_user_label.setText(
-                    f"{user_icon} "
                     f"<span style='font-weight:700;color:#e6edf3'>guest</span>"
                     f" <span style='color:#8b949e'>(Гость)</span>"
                     f" <span style='color:#8b949e'>|</span> "
-                    f"{bank_icon} <span style='color:#8b949e'>Банок:</span> "
+                    f"<span style='color:#8b949e'>Банок:</span> "
                     f"<span style='font-weight:700;color:#e6edf3'>{banks}</span>"
                 )
             else:
-                role = "Админ" if cu.is_admin else "Пользователь"
+                # Роли: admin/moderator/user
+                role_key = getattr(cu, "role", "admin" if cu.is_admin else "user")
+                if role_key == "admin" or cu.is_admin:
+                    role = "Админ"
+                    role_color = "#22c55e"
+                    dot_color = "#22c55e"
+                elif role_key == "moderator":
+                    role = "Модератор"
+                    role_color = "#eab308"
+                    dot_color = "#eab308"
+                else:
+                    role = "Пользователь"
+                    role_color = "#8b949e"
+                    dot_color = "#8b949e"
                 banks = _format_int_spaces(cu.tokens)
                 # Выделяем имя пользователя и количество банок
                 self.status_user_label.setText(
-                    f"{user_icon} "
+                    f"<span style='color:{dot_color};font-size:14px'>●</span> "
                     f"<span style='font-weight:700;color:#e6edf3'>{cu.username}</span>"
-                    f" <span style='color:#8b949e'>({role})</span>"
+                    f" <span style='color:{role_color}'>({role})</span>"
                     f" <span style='color:#8b949e'>|</span> "
-                    f"{bank_icon} <span style='color:#8b949e'>Банок:</span> "
+                    f"<span style='color:#8b949e'>Банок:</span> "
                     f"<span style='font-weight:700;color:#e6edf3'>{banks}</span>"
                 )
 
@@ -1314,6 +1344,7 @@ class MainWindow(QMainWindow):
                 is_admin=bool(user.get("is_admin")),
                 tokens=int(user.get("tokens", 0)),
                 is_blocked=bool(user.get("is_blocked")),
+                role=str(user.get("role") or ("admin" if bool(user.get("is_admin")) else "user")),
             )
             # Запоминаем последнего вошедшего пользователя
             self.config["auth_username"] = user["username"]
@@ -1333,6 +1364,13 @@ class MainWindow(QMainWindow):
                 self._show_admin_panel()
 
     def _show_register_dialog(self) -> None:
+        # Регистрация (создание пользователей) доступна только админу/модератору
+        cu = self.current_user
+        role_key = getattr(cu, "role", "guest") if cu is not None else "guest"
+        if not (cu and cu.username not in ("", "guest") and role_key in ("admin", "moderator")):
+            QMessageBox.warning(self, "Нет доступа", "Создавать пользователей может только администратор или модератор.")
+            return
+
         from PySide6.QtWidgets import QLineEdit
 
         dlg = QDialog(self)
@@ -1465,7 +1503,7 @@ class MainWindow(QMainWindow):
         dlg.exec()
 
     def _logout_current_user(self) -> None:
-        self.current_user = CurrentUser(username="guest", is_admin=False, tokens=0, is_blocked=False)
+        self.current_user = CurrentUser(username="guest", is_admin=False, tokens=0, is_blocked=False, role="guest")
         self.config["auth_username"] = ""
         save_config(self.config)
         self._update_user_menu_state()
@@ -1500,7 +1538,8 @@ class MainWindow(QMainWindow):
         table.setRowCount(len(users))
         for row, u in enumerate(users):
             username = str(u.get("username", ""))
-            role = "Админ" if u.get("is_admin") else "Пользователь"
+            role_key = str(u.get("role") or ("admin" if u.get("is_admin") else "user"))
+            role = "Админ" if role_key == "admin" else ("Модератор" if role_key == "moderator" else "Пользователь")
             tokens = str(u.get("tokens", 0))
             status = "Заблокирован" if u.get("is_blocked") else "Активен"
             table.setItem(row, 0, QTableWidgetItem(username))
@@ -1555,12 +1594,19 @@ class MainWindow(QMainWindow):
         btn_delete.setIconSize(QSize(16, 16))
         btn_delete.setToolTip("Удалить пользователя (с подтверждением)")
 
+        btn_role = QPushButton()
+        btn_role.setProperty("class", "iconOnly accent")
+        btn_role.setIcon(load_phosphor_icon("Shield_Check", 16))
+        btn_role.setIconSize(QSize(16, 16))
+        btn_role.setToolTip("Изменить роль пользователя (Пользователь / Модератор / Админ)")
+
         controls_row.addWidget(btn_create)
         controls_row.addWidget(btn_tokens)
         controls_row.addWidget(btn_block)
         controls_row.addWidget(btn_password)
         controls_row.addWidget(btn_show_password)
         controls_row.addWidget(btn_message)
+        controls_row.addWidget(btn_role)
         controls_row.addWidget(btn_delete)
         controls_row.addStretch(1)
         cly.addLayout(controls_row)
@@ -1587,7 +1633,8 @@ class MainWindow(QMainWindow):
             table.setRowCount(len(users))
             for row, u in enumerate(users):
                 username = str(u.get("username", ""))
-                role = "Админ" if u.get("is_admin") else "Пользователь"
+                role_key = str(u.get("role") or ("admin" if u.get("is_admin") else "user"))
+                role = "Админ" if role_key == "admin" else ("Модератор" if role_key == "moderator" else "Пользователь")
                 tokens = str(u.get("tokens", 0))
                 status = "Заблокирован" if u.get("is_blocked") else "Активен"
                 table.setItem(row, 0, QTableWidgetItem(username))
@@ -1729,6 +1776,61 @@ class MainWindow(QMainWindow):
             msg_dlg.resize(380, 260)
             msg_dlg.exec()
 
+        def on_change_role() -> None:
+            user, row = _get_selected_user()
+            if not user:
+                QMessageBox.information(dlg, "Выбор пользователя", "Сначала выберите пользователя в таблице.")
+                return
+
+            username = str(user.get("username") or "")
+            current_role = str(user.get("role") or ("admin" if user.get("is_admin") else "user"))
+
+            # Модератор: может почти всё, но не может назначать админом и не может удалять админа.
+            is_moderator = bool(getattr(cu, "role", "") == "moderator")
+            if is_moderator:
+                allowed = [("Пользователь", "user"), ("Модератор", "moderator")]
+            else:
+                allowed = [("Пользователь", "user"), ("Модератор", "moderator"), ("Админ", "admin")]
+
+            items = [label for label, _ in allowed]
+            default_idx = 0
+            for i, (_, key) in enumerate(allowed):
+                if key == current_role:
+                    default_idx = i
+                    break
+
+            choice, ok = QInputDialog.getItem(
+                dlg,
+                "Изменить роль",
+                f"Роль для {username}:",
+                items,
+                default_idx,
+                False,
+            )
+            if not ok:
+                return
+
+            chosen_key = dict(allowed).get(str(choice), "user")
+
+            # Доп. защита: модератор не может назначить админа никому.
+            if is_moderator and chosen_key == "admin":
+                QMessageBox.warning(dlg, "Запрещено", "Модератор не может назначать роль администратора.")
+                return
+
+            user["role"] = chosen_key
+            user["is_admin"] = bool(chosen_key == "admin")
+            _save_users({"users": users})
+
+            # Обновляем таблицу (роль)
+            label = "Админ" if chosen_key == "admin" else ("Модератор" if chosen_key == "moderator" else "Пользователь")
+            table.item(row, 1).setText(label)
+
+            # Если изменили роль текущего пользователя — обновим статус
+            if self.current_user is not None and username == self.current_user.username:
+                self.current_user.is_admin = bool(chosen_key == "admin")
+                self.current_user.role = chosen_key
+                self._update_user_menu_state()
+
         def on_show_password() -> None:
             user, _ = _get_selected_user()
             if not user:
@@ -1751,9 +1853,15 @@ class MainWindow(QMainWindow):
                 QMessageBox.information(dlg, "Выбор пользователя", "Сначала выберите пользователя в таблице.")
                 return
             username = user.get("username")
+            target_role = str(user.get("role") or ("admin" if user.get("is_admin") else "user"))
+            is_moderator = bool(getattr(cu, "role", "") == "moderator")
             # Не даём удалить себя и базового админа
             if username == cu.username or username == "Delbraun":
                 QMessageBox.warning(dlg, "Нельзя удалить", "Нельзя удалить текущего администратора.")
+                return
+            # Модератор не может удалять админов
+            if is_moderator and target_role == "admin":
+                QMessageBox.warning(dlg, "Запрещено", "Модератор не может удалять администратора.")
                 return
             reply = QMessageBox.question(
                 dlg,
@@ -1780,6 +1888,7 @@ class MainWindow(QMainWindow):
         btn_block.clicked.connect(on_toggle_block)
         btn_password.clicked.connect(on_change_password)
         btn_message.clicked.connect(on_send_message)
+        btn_role.clicked.connect(on_change_role)
         btn_delete.clicked.connect(on_delete_user)
         btn_show_password.clicked.connect(on_show_password)
 
@@ -2095,14 +2204,16 @@ class MainWindow(QMainWindow):
         left_layout.setSpacing(6)
 
         row1 = QHBoxLayout()
-        step1 = QLabel("1. Карточки")
-        step1.setObjectName("sectionLabel")
-        row1.addWidget(step1)
+        self.step1_label = QLabel("1. Карточки")
+        self.step1_label.setObjectName("sectionLabel")
+        self.step1_label.setVisible(False)
+        row1.addWidget(self.step1_label)
         row1.addStretch(1)
         left_layout.addLayout(row1)
-        hint1 = QLabel("Добавьте изображения или перетащите в окно")
-        hint1.setObjectName("stepHint")
-        left_layout.addWidget(hint1)
+        self.hint1_label = QLabel("Добавьте изображения или перетащите в окно")
+        self.hint1_label.setObjectName("stepHint")
+        self.hint1_label.setVisible(False)
+        left_layout.addWidget(self.hint1_label)
 
         toolbar = QHBoxLayout()
         toolbar.setSpacing(4)
@@ -2142,7 +2253,7 @@ class MainWindow(QMainWindow):
         self.list_widget.setMovement(QListWidget.Static)
         left_layout.addWidget(self.list_widget, 1)
 
-        main_layout.addWidget(self.left_panel, 2)
+        main_layout.addWidget(self.left_panel, 3)
 
         # —— 2. Превью ——
         self.center_panel = QFrame()
@@ -2151,6 +2262,7 @@ class MainWindow(QMainWindow):
         center_layout.setSpacing(6)
         hint2 = QLabel("Карточка + видео → наложение в реальном времени")
         hint2.setObjectName("stepHint")
+        hint2.setVisible(False)
         center_layout.addWidget(hint2)
 
         self.lbl_image_preview = QLabel()
@@ -2183,7 +2295,8 @@ class MainWindow(QMainWindow):
         preview_controls.addWidget(self.slider_preview_timeline, 1)
         center_layout.addLayout(preview_controls)
         center_layout.addStretch(1)
-        main_layout.addWidget(self.center_panel, 3)
+        # Центр делаем уже, чтобы больше места было слева/справа
+        main_layout.addWidget(self.center_panel, 2)
 
         # —— 3. Видео и настройки ——
         self.right_scroll = QScrollArea()
@@ -2204,9 +2317,10 @@ class MainWindow(QMainWindow):
         video_pl.setSpacing(6)
 
         video_header = QHBoxLayout()
-        lbl_video = QLabel("Ролики (Assets/video)")
-        lbl_video.setObjectName("stepHint")
-        video_header.addWidget(lbl_video)
+        self.lbl_video_hint = QLabel("Ролики (Assets/video)")
+        self.lbl_video_hint.setObjectName("stepHint")
+        self.lbl_video_hint.setVisible(False)
+        video_header.addWidget(self.lbl_video_hint)
         video_header.addStretch(1)
         btn_refresh_videos = QPushButton()
         btn_refresh_videos.setToolTip("Обновить список видео (Ctrl+R)")
@@ -2214,12 +2328,15 @@ class MainWindow(QMainWindow):
         btn_refresh_videos.setIconSize(QSize(12, 12))
         btn_refresh_videos.setProperty("class", "iconOnly accent")
         btn_refresh_videos.clicked.connect(self.on_refresh_videos_clicked)
+        btn_refresh_videos.setVisible(False)
         video_header.addWidget(btn_refresh_videos)
         video_pl.addLayout(video_header)
 
         # Перенесён выбор разрешения предпросмотра рядом с видео
         res_row = QHBoxLayout()
-        res_row.addWidget(QLabel("Разрешение предпросмотра:"))
+        self.lbl_preview_res = QLabel("Разрешение предпросмотра:")
+        self.lbl_preview_res.setVisible(False)
+        res_row.addWidget(self.lbl_preview_res)
         res_row.addStretch(1)
         self.preview_mode_combo = QComboBox()
         self.preview_mode_combo.addItem("200×266", (200, 266))
@@ -2227,6 +2344,7 @@ class MainWindow(QMainWindow):
         self.preview_mode_combo.addItem("320×426", (320, 426))
         self.preview_mode_combo.setCurrentIndex(2)  # по умолчанию 320×426
         self.preview_mode_combo.currentIndexChanged.connect(self._on_preview_mode_changed)
+        self.preview_mode_combo.setVisible(False)
         res_row.addWidget(self.preview_mode_combo)
         video_pl.addLayout(res_row)
         self.video_list = QListWidget()
@@ -2305,7 +2423,8 @@ class MainWindow(QMainWindow):
 
         right_layout.addStretch(1)
         self.right_scroll.setWidget(right_content)
-        main_layout.addWidget(self.right_scroll, 2)
+        # Правая панель шире (чтобы элементы не вылезали)
+        main_layout.addWidget(self.right_scroll, 3)
 
         self.list_widget.currentRowChanged.connect(self.on_current_item_changed)
         self.list_widget.itemSelectionChanged.connect(self.on_selection_changed)
@@ -2323,9 +2442,9 @@ class MainWindow(QMainWindow):
         act_login.triggered.connect(self._show_login_dialog)
         user_menu.addAction(act_login)
 
-        act_register = QAction("Регистрация", self)
-        act_register.triggered.connect(self._show_register_dialog)
-        user_menu.addAction(act_register)
+        self.act_register = QAction("Регистрация", self)
+        self.act_register.triggered.connect(self._show_register_dialog)
+        user_menu.addAction(self.act_register)
 
         self.act_profile = QAction("Профиль", self)
         self.act_profile.triggered.connect(self._show_profile_dialog)
@@ -3774,14 +3893,35 @@ class MainWindow(QMainWindow):
             return
 
         # Перед началом экспорта даём пользователю выбрать параметры рендера/кодека.
+        ffmpeg_exe = _find_ffmpeg()
+        gpu_available = bool(ffmpeg_exe and _detect_h264_gpu_encoder(ffmpeg_exe))
+
         settings_dialog = ExportSettingsDialog(
-            self, self.export_codec, self.export_size_str, self.export_fps, self.render_preset
+            self,
+            self.export_codec,
+            self.export_size_str,
+            self.export_fps,
+            self.render_preset,
+            self.export_group_by_card_folder,
+            self.export_gpu_turbo,
+            gpu_available,
         )
         SoundPlayer.play(SOUND_DIALOG)
         if settings_dialog.exec() != QDialog.DialogCode.Accepted:
             return
 
-        self.export_codec, self.export_size_str, self.export_fps, self.render_preset = settings_dialog.get_values()
+        (
+            self.export_codec,
+            self.export_size_str,
+            self.export_fps,
+            self.render_preset,
+            self.export_group_by_card_folder,
+            self.export_gpu_turbo,
+        ) = settings_dialog.get_values()
+
+        # Если пользователь включил «Турбо экспорт через GPU» — фиксируем самый быстрый режим рендера.
+        if self.export_gpu_turbo:
+            self.render_preset = "fast"
 
         # Если выбран кодек H.264, но ffmpeg не установлен — предлагаем установить через winget.
         if self.export_codec.lower() == "h264" and _find_ffmpeg() is None:
@@ -3833,6 +3973,8 @@ class MainWindow(QMainWindow):
         self.config["export_size"] = self.export_size_str
         self.config["export_fps"] = self.export_fps
         self.config["render_preset"] = self.render_preset
+        self.config["export_group_by_card_folder"] = bool(self.export_group_by_card_folder)
+        self.config["export_gpu_turbo"] = bool(self.export_gpu_turbo)
         save_config(self.config)
 
         # Реальная обработка видео с наложением «Экран»
@@ -3929,7 +4071,11 @@ class MainWindow(QMainWindow):
             try:
                 # Имя выходного файла: имя картинки + _anim.mp4
                 img_name = Path(item.image_path).stem
-                out_path = build_unique_output_path(export_dir, img_name)
+                out_path = build_unique_output_path(
+                    export_dir,
+                    img_name,
+                    group_by_card_folder=bool(self.export_group_by_card_folder),
+                )
 
                 # Обновляем информацию по текущей карточке
                 lbl_current.setText(f"Экспорт карточки {idx}/{total_items}:\n{item.image_path}")
@@ -3982,6 +4128,7 @@ class MainWindow(QMainWindow):
                     export_size=export_size,
                     export_fps=float(self.export_fps),
                     export_codec=self.export_codec,
+                    gpu_turbo=bool(self.export_gpu_turbo),
                 )
                 success_count += 1
             except Exception as e:
@@ -4159,22 +4306,28 @@ def format_time(seconds: float) -> str:
     return f"{minutes:02d}:{secs:02d}"
 
 
-def build_unique_output_path(export_dir: str, img_name: str) -> str:
+def build_unique_output_path(export_dir: str, img_name: str, *, group_by_card_folder: bool = True) -> str:
     """
     Построение уникального пути для файла экспорта.
 
     Правила:
-    - если файла `<name>_anim.mp4` ещё нет — используем его;
-    - если есть — пробуем `<name>_anim_2.mp4`, потом `_3` и т.д.,
+    - Экспорт идёт "по папкам по имени файла": для карточки `<name>` создаём подпапку `<export_dir>/<name>/`.
+    - Если файла `<name>_anim.mp4` ещё нет — используем его;
+    - Если есть — пробуем `<name>_anim_2.mp4`, потом `_3` и т.д.,
       пока не найдём свободное имя.
     """
-    base = Path(export_dir) / f"{img_name}_anim.mp4"
+    out_dir = Path(export_dir)
+    if group_by_card_folder:
+        out_dir = out_dir / img_name
+        out_dir.mkdir(parents=True, exist_ok=True)
+
+    base = out_dir / f"{img_name}_anim.mp4"
     if not base.exists():
         return str(base)
 
     counter = 2
     while True:
-        candidate = Path(export_dir) / f"{img_name}_anim_{counter}.mp4"
+        candidate = out_dir / f"{img_name}_anim_{counter}.mp4"
         if not candidate.exists():
             return str(candidate)
         counter += 1
@@ -4188,6 +4341,15 @@ def _find_ffmpeg() -> str | None:
     приложение в папку WinGet Packages и не всегда прописывает путь в PATH,
     поэтому одного shutil.which здесь недостаточно.
     """
+    # 0. Сначала пробуем ffmpeg рядом с приложением (bin/ffmpeg.exe)
+    #    Важно: в собранной версии BASE_DIR указывает на папку с .exe.
+    bundled = BASE_DIR / "bin" / "ffmpeg.exe"
+    try:
+        if bundled.exists():
+            return str(bundled)
+    except Exception:
+        pass
+
     # 1. Обычный поиск в PATH
     exe = shutil.which("ffmpeg")
     if exe:
@@ -4225,6 +4387,36 @@ def _find_ffmpeg() -> str | None:
     return None
 
 
+def _detect_h264_gpu_encoder(ffmpeg_exe: str) -> str | None:
+    """
+    Возвращает имя доступного GPU-энкодера H.264 для ffmpeg (NVENC/AMF/QSV),
+    либо None, если аппаратного энкодера нет.
+    """
+    try:
+        creationflags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
+        res = subprocess.run(
+            [ffmpeg_exe, "-hide_banner", "-encoders"],
+            capture_output=True,
+            text=True,
+            errors="replace",
+            creationflags=creationflags,
+            timeout=3,
+        )
+        out = (res.stdout or "") + "\n" + (res.stderr or "")
+        out_l = out.lower()
+    except Exception:
+        return None
+
+    # Приоритет: NVIDIA -> AMD -> Intel
+    if "h264_nvenc" in out_l:
+        return "h264_nvenc"
+    if "h264_amf" in out_l:
+        return "h264_amf"
+    if "h264_qsv" in out_l:
+        return "h264_qsv"
+    return None
+
+
 def render_card_video(
     image_path: str,
     video_path: str,
@@ -4239,6 +4431,7 @@ def render_card_video(
     export_size: tuple[int, int] = (900, 1200),
     export_fps: float = 60.0,
     export_codec: str = "h264",
+    gpu_turbo: bool = False,
 ) -> None:
     """
     Рендер одной видео-карточки на базе OpenCV.
@@ -4247,9 +4440,14 @@ def render_card_video(
     export_size: итоговый размер кадра (ширина, высота), по умолчанию 900x1200.
     export_fps: целевая частота кадров (24 / 30 / 60), по умолчанию 60.
     export_codec: логическое имя кодека ("h264", "mpeg4" и т.п.).
+    gpu_turbo: если True — пытаемся включить аппаратное кодирование H.264 через FFmpeg (NVENC/AMF/QSV).
 
     В режиме "fast" обработка идёт в половинном разрешении, затем апскейл до export_size.
     """
+    # В режиме gpu_turbo всегда используем самый быстрый профиль рендера.
+    if gpu_turbo and render_preset != "fast":
+        render_preset = "fast"
+
     # Итоговый размер вывода (OpenCV: ширина, высота)
     out_w, out_h = export_size
 
@@ -4320,6 +4518,12 @@ def render_card_video(
         fourcc_candidates = ("avc1", "H264", "mp4v")
 
     if use_ffmpeg:
+        gpu_encoder = None
+        if codec != "mpeg4" and gpu_turbo:
+            gpu_encoder = _detect_h264_gpu_encoder(ffmpeg_exe)
+            if gpu_encoder:
+                ffmpeg_codec = gpu_encoder
+
         cmd = [
             ffmpeg_exe,
             "-f",
@@ -4334,17 +4538,49 @@ def render_card_video(
             "pipe:0",
             "-c:v",
             ffmpeg_codec,
-            "-profile:v",
-            "main",
             "-pix_fmt",
             "yuv420p",
-            "-preset",
-            ffmpeg_preset,
-            "-crf",
-            "23",
             "-y",
             output_path,
         ]
+
+        # Параметры качества/скорости отличаются для CPU и GPU энкодеров.
+        if ffmpeg_codec == "libx264":
+            # В cmd есть два "-pix_fmt": первый относится к rawvideo input, второй — к output.
+            # Профиль нужно вставлять перед output pix_fmt.
+            try:
+                out_pix_idx = len(cmd) - 1 - cmd[::-1].index("-pix_fmt")
+            except ValueError:
+                out_pix_idx = None
+
+            if out_pix_idx is not None:
+                cmd.insert(out_pix_idx, "-profile:v")
+                cmd.insert(out_pix_idx + 1, "main")
+            cmd.insert(cmd.index("-y"), "-preset")
+            cmd.insert(cmd.index("-y"), ffmpeg_preset)
+            cmd.insert(cmd.index("-y"), "-crf")
+            cmd.insert(cmd.index("-y"), "23")
+        elif ffmpeg_codec == "h264_nvenc":
+            cmd.insert(cmd.index("-y"), "-preset")
+            cmd.insert(cmd.index("-y"), "p1")
+            cmd.insert(cmd.index("-y"), "-rc")
+            cmd.insert(cmd.index("-y"), "vbr")
+            cmd.insert(cmd.index("-y"), "-cq")
+            cmd.insert(cmd.index("-y"), "23")
+            cmd.insert(cmd.index("-y"), "-b:v")
+            cmd.insert(cmd.index("-y"), "0")
+        elif ffmpeg_codec == "h264_amf":
+            cmd.insert(cmd.index("-y"), "-quality")
+            cmd.insert(cmd.index("-y"), "speed")
+            cmd.insert(cmd.index("-y"), "-rc")
+            cmd.insert(cmd.index("-y"), "cqp")
+            cmd.insert(cmd.index("-y"), "-qp")
+            cmd.insert(cmd.index("-y"), "23")
+        elif ffmpeg_codec == "h264_qsv":
+            cmd.insert(cmd.index("-y"), "-preset")
+            cmd.insert(cmd.index("-y"), "veryfast")
+            cmd.insert(cmd.index("-y"), "-global_quality")
+            cmd.insert(cmd.index("-y"), "23")
         try:
             creationflags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
             proc = subprocess.Popen(
@@ -4475,7 +4711,8 @@ def main() -> None:
         app.setFont(QFont(_google_sans_family, 13))
 
     # Прелоад-окно (splash): фирменный арт + информация, как на референсе
-    splash_w, splash_h = 1024, 584
+    # Уменьшаем сплэш примерно на 1/3
+    splash_w, splash_h = int(1024 * (2 / 3)), int(584 * (2 / 3))
     splash_pix = QPixmap(splash_w, splash_h)
     splash_pix.fill(QColor("#020617"))
     # Основной арт для сплэша (как на референсе); если его нет — используем старый фон

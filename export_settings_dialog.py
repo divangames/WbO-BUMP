@@ -1,6 +1,16 @@
 from __future__ import annotations
 
-from PySide6.QtWidgets import QDialog, QVBoxLayout, QHBoxLayout, QLabel, QComboBox, QPushButton, QFrame, QWidget
+from PySide6.QtWidgets import (
+    QDialog,
+    QVBoxLayout,
+    QHBoxLayout,
+    QLabel,
+    QComboBox,
+    QPushButton,
+    QFrame,
+    QWidget,
+    QCheckBox,
+)
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QShortcut, QKeySequence
 
@@ -17,6 +27,9 @@ class ExportSettingsDialog(QDialog):
         size_str: str,
         fps: int,
         render_preset: str,
+        group_by_card_folder: bool,
+        gpu_turbo: bool,
+        gpu_available: bool,
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Настройки экспорта видео")
@@ -27,6 +40,9 @@ class ExportSettingsDialog(QDialog):
         self._size_str = size_str or "900x1200"
         self._fps = int(fps or 60)
         self._render_preset = render_preset or "balanced"
+        self._group_by_card_folder = bool(group_by_card_folder)
+        self._gpu_turbo = bool(gpu_turbo)
+        self._gpu_available = bool(gpu_available)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -78,6 +94,17 @@ class ExportSettingsDialog(QDialog):
         row_fps.addWidget(self.combo_fps)
         content_layout.addLayout(row_fps)
 
+        self.chk_group_by_folder = QCheckBox("Сохранять в подпапках по имени карточки")
+        self.chk_group_by_folder.setChecked(self._group_by_card_folder)
+        content_layout.addWidget(self.chk_group_by_folder)
+
+        self.chk_gpu_turbo = QCheckBox("Турбо экспорт через GPU (ускорение кодирования)")
+        self.chk_gpu_turbo.setChecked(self._gpu_turbo and self._gpu_available)
+        self.chk_gpu_turbo.setEnabled(self._gpu_available)
+        if not self._gpu_available:
+            self.chk_gpu_turbo.setToolTip("GPU-энкодер H.264 не найден (NVENC/AMF/QSV). Проверьте драйверы и сборку FFmpeg.")
+        content_layout.addWidget(self.chk_gpu_turbo)
+
         # Кнопки
         row_btns = QHBoxLayout()
         row_btns.addStretch(1)
@@ -119,12 +146,16 @@ class ExportSettingsDialog(QDialog):
         self._size_str = "900x1200"
         self._fps = 60
         self._apply_initial_values()
+        self.chk_group_by_folder.setChecked(True)
+        self.chk_gpu_turbo.setChecked(False)
 
-    def get_values(self) -> tuple[str, str, int, str]:
-        """Возвращает (codec, size_str, fps, render_preset)."""
+    def get_values(self) -> tuple[str, str, int, str, bool, bool]:
+        """Возвращает (codec, size_str, fps, render_preset, group_by_card_folder, gpu_turbo)."""
         codec = self.combo_codec.currentData()
         size = self.combo_size.currentData()
         fps = int(self.combo_fps.currentData())
         quality = self.combo_quality.currentData()
-        return str(codec), str(size), fps, str(quality)
+        group_by = bool(self.chk_group_by_folder.isChecked())
+        gpu_turbo = bool(self.chk_gpu_turbo.isChecked()) and bool(self._gpu_available)
+        return str(codec), str(size), fps, str(quality), group_by, gpu_turbo
 

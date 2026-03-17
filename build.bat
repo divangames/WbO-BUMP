@@ -62,6 +62,12 @@ set "DEST=dist\WboBAMP\Assets"
 if exist "%DEST%" rmdir /S /Q "%DEST%"
 xcopy /E /I /Y "Assets" "%DEST%"
 
+echo.
+echo Copy bin (ffmpeg/codecs)...
+set "BINDEST=dist\WboBAMP\bin"
+if exist "%BINDEST%" rmdir /S /Q "%BINDEST%"
+if exist "bin" xcopy /E /I /Y "bin" "%BINDEST%"
+
 echo Creating launcher (run exe with console to see errors)...
 set "LAUNCH=dist\WboBAMP\run_here.bat"
 echo @echo off > "%LAUNCH%"
