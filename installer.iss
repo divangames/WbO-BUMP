@@ -2,7 +2,7 @@
 ; Сборка: build_installer.bat передаёт /DMyOutputDir="полный_путь" чтобы exe попал в нужную папку
 
 #define MyAppName "Wbo BAMP"
-#define MyAppVersion "1.2.2.2.a"
+#define MyAppVersion "0.1.2.2.3"
 #define MyAppPublisher "Wbo BAMP"
 #define MyAppExeName "WboBAMP.exe"
 #define MyAppAssocName "Wbo BAMP"

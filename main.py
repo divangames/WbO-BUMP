@@ -44,6 +44,7 @@ from PySide6.QtGui import (
     QPen,
     QColor,
     QImage,
+    QBitmap,
     QIcon,
     QGuiApplication,
     QAction,
@@ -53,7 +54,21 @@ from PySide6.QtGui import (
     QFontDatabase,
     QDesktopServices,
 )
-from PySide6.QtCore import Qt, QSize, QUrl, QTimer, QByteArray, QCoreApplication, QProcess, QSettings, QPoint
+from PySide6.QtCore import (
+    Qt,
+    QSize,
+    QUrl,
+    QTimer,
+    QByteArray,
+    QCoreApplication,
+    QProcess,
+    QSettings,
+    QPoint,
+    QRect,
+    QPropertyAnimation,
+    QEasingCurve,
+    QAbstractAnimation,
+)
 from PySide6.QtNetwork import QNetworkAccessManager, QNetworkRequest, QNetworkReply
 
 try:
@@ -70,7 +85,9 @@ from ui_common import DialogTitleBar
 # ВАЖНО: комментарии всегда на русском, не удалять при доработках
 
 # Версия приложения (для статус-бара, «О программе» и сплэша)
-APP_VERSION = "1.2.2.2.a"
+# Версия приложения (для статус-бара, «О программе» и сплэша)
+# Формат: для корректного сравнения в автоапдейтере используем только цифры через точки.
+APP_VERSION = "0.1.2.2.3"
 
 # Проверка обновлений: последний релиз на GitHub
 GITHUB_RELEASES_API = "https://api.github.com/repos/divangames/WbO-BUMP/releases/latest"
@@ -647,6 +664,15 @@ HELP_DIALOG_STYLE = """
     QDialog { background-color: #16181c; border-radius: 8px; border: 1px solid #2a3038; }
     QLabel { color: #e2e8f0; font-size: 13px; background: transparent; }
     QScrollArea { border: none; background: transparent; }
+    QLineEdit {
+        background: #0f141a;
+        color: #e2e8f0;
+        border: 1px solid #334155;
+        border-radius: 6px;
+        padding: 7px 9px;
+        selection-background-color: #2563eb;
+    }
+    QLineEdit:focus { border-color: #3b82f6; }
     QPushButton { background: transparent; color: #e2e8f0; border: 1px solid #475569; border-radius: 4px; padding: 6px 12px; font-size: 13px; }
     QPushButton:hover { background: rgba(71, 85, 105, 0.5); }
 """
@@ -654,8 +680,8 @@ HELP_DIALOG_STYLE = """
 # Стиль уведомления в трее (в духе приложения: тёмная тема, акцент)
 TRAY_NOTIFICATION_STYLE = """
     QDialog {
-        background-color: #1a1f26;
-        border: 1px solid #2a3038;
+        background-color: rgba(26, 31, 38, 225);
+        border: 1px solid rgba(42, 48, 56, 225);
         border-radius: 10px;
         border-top: 2px solid #3d454f;
     }
@@ -693,31 +719,39 @@ TRAY_NOTIFICATION_STYLE = """
 # Стиль попапа «Доступно обновление» (слева снизу внутри окна, в духе кнопок удалить/копировать)
 UPDATE_AVAILABLE_POPUP_STYLE = """
     QDialog {
-        background-color: #1a1f26;
-        border: 1px solid #2a3038;
+        background-color: rgba(26, 31, 38, 210);
+        border: 1px solid rgba(42, 48, 56, 220);
         border-left: 3px solid #238636;
-        border-radius: 8px;
+        border-radius: 10px;
     }
-    QFrame#updatePopupTextBlock {
-        background-color: #14181c;
-        border-radius: 6px;
-        border: none;
-    }
-    QLabel#updatePopupTitle { color: #e6edf3; font-size: 13px; font-weight: 600; background: transparent; }
-    QLabel#updatePopupText { color: #b1b8c2; font-size: 12px; background: transparent; }
+    QLabel#updatePopupTitle { color: #e6edf3; font-size: 12px; font-weight: 700; background: transparent; }
     QPushButton#updatePopupBtn {
         background: transparent;
         border: 1px solid #238636;
         color: #3fb950;
         font-weight: 600;
         border-radius: 6px;
-        padding: 6px 14px;
-        font-size: 12px;
+        padding: 5px 10px;
+        font-size: 11px;
     }
     QPushButton#updatePopupBtn:hover {
         background: rgba(35, 134, 54, 0.2);
         border-color: #2ea043;
         color: #56d364;
+    }
+    QPushButton#updatePopupLink {
+        background: transparent;
+        border: 1px solid #475569;
+        color: #94a3b8;
+        font-weight: 600;
+        border-radius: 6px;
+        padding: 5px 10px;
+        font-size: 11px;
+    }
+    QPushButton#updatePopupLink:hover {
+        background: rgba(71, 85, 105, 0.45);
+        border-color: #64748b;
+        color: #e2e8f0;
     }
     QPushButton#updatePopupClose {
         background: transparent;
@@ -739,6 +773,7 @@ def show_export_complete_tray_notification(
     message: str,
     on_open: Callable[[], None],
     on_open_folder: Callable[[], None] | None = None,
+    auto_close_seconds: float | None = None,
 ) -> QDialog:
     """
     Показывает стильное уведомление об окончании экспорта в углу экрана.
@@ -757,10 +792,36 @@ def show_export_complete_tray_notification(
     layout.setContentsMargins(0, 0, 0, 0)
     layout.setSpacing(0)
 
-    # Верхняя полоска с иконкой/акцентом
+    # Верхняя полоска: progress stripe (обновление/экспорт)
     header = QFrame()
     header.setFixedHeight(4)
-    header.setStyleSheet("background: qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 #0ea5e9, stop:1 #38bdf8); border-radius: 10px 10px 0 0;")
+    header.setObjectName("exportHeader")
+    header.setStyleSheet("border-radius: 10px 10px 0 0; background: transparent;")
+    header_ly = QHBoxLayout(header)
+    header_ly.setContentsMargins(12, 0, 12, 0)
+    header_ly.setSpacing(0)
+
+    stripe_pb = QProgressBar()
+    stripe_pb.setRange(0, 100)
+    stripe_pb.setValue(0)
+    stripe_pb.setTextVisible(False)
+    stripe_pb.setFixedHeight(4)
+    stripe_pb.setObjectName("exportStripeProgress")
+    stripe_pb.setVisible(False)
+    stripe_pb.setStyleSheet(
+        """
+        QProgressBar {
+            border: none;
+            background: rgba(14, 165, 233, 0.15);
+            border-radius: 4px;
+        }
+        QProgressBar::chunk {
+            background: qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 #0ea5e9, stop:1 #38bdf8);
+            border-radius: 4px;
+        }
+        """
+    )
+    header_ly.addWidget(stripe_pb, 1)
     layout.addWidget(header)
 
     content = QWidget()
@@ -812,6 +873,62 @@ def show_export_complete_tray_notification(
         dlg.move(geo.right() - dlg.width() - 24, geo.bottom() - dlg.height() - 24)
     QShortcut(QKeySequence("Escape"), dlg, dlg.accept)
     dlg.show()
+
+    # Авто-исчезновение с анимацией и прогрессом на 5 секунд.
+    if auto_close_seconds is not None and auto_close_seconds > 0:
+        start_ts = time.monotonic()
+        duration = float(auto_close_seconds)
+        dlg.setWindowOpacity(1.0)
+        stripe_pb.setVisible(True)
+
+        # Остановить таймер, если пользователь успел нажать кнопку
+        auto_timer = QTimer(dlg)
+        auto_timer.setInterval(50)
+
+        def _close_with_animation() -> None:
+            try:
+                try:
+                    auto_timer.stop()
+                except Exception:
+                    pass
+                # Мягкое "скольжение" вниз + fade-out
+                start_pos = dlg.pos()
+                end_pos = QPoint(start_pos.x(), start_pos.y() + 10)
+
+                anim_pos = QPropertyAnimation(dlg, b"pos", dlg)
+                anim_pos.setDuration(340)
+                anim_pos.setEasingCurve(QEasingCurve.InCubic)
+                anim_pos.setStartValue(start_pos)
+                anim_pos.setEndValue(end_pos)
+
+                anim_op = QPropertyAnimation(dlg, b"windowOpacity", dlg)
+                anim_op.setDuration(280)
+                anim_op.setEasingCurve(QEasingCurve.InCubic)
+                anim_op.setStartValue(dlg.windowOpacity())
+                anim_op.setEndValue(0.0)
+
+                dlg._auto_close_anims = (anim_pos, anim_op)
+                anim_op.finished.connect(dlg.close)
+
+                anim_pos.start()
+                anim_op.start()
+            except Exception:
+                dlg.close()
+
+        def _tick() -> None:
+            if not dlg.isVisible():
+                auto_timer.stop()
+                return
+            elapsed = time.monotonic() - start_ts
+            frac = max(0.0, min(1.0, elapsed / duration)) if duration > 0 else 1.0
+            stripe_pb.setValue(int(frac * 100))
+            if frac >= 1.0:
+                auto_timer.stop()
+                _close_with_animation()
+
+        auto_timer.timeout.connect(_tick)
+        auto_timer.start()
+
     return dlg
 
 
@@ -1097,11 +1214,10 @@ class MainWindow(QMainWindow):
         if saved_geom and isinstance(saved_geom, QByteArray):
             self.restoreGeometry(saved_geom)
         else:
-            self.resize(960, 720)
+            self.resize(960, 630)
 
-        # Фиксированная ширина окна: 960px
-        self.setMinimumWidth(960)
-        self.setMaximumWidth(960)
+        # Фиксированное окно: 960×630 (без ресайза)
+        self.setFixedSize(960, 630)
 
         if APP_ICON_PATH.exists():
             self.setWindowIcon(QIcon(str(APP_ICON_PATH)))
@@ -1211,6 +1327,7 @@ class MainWindow(QMainWindow):
         cu = self.current_user
         has_user = cu is not None and cu.username != "guest"
         self.act_profile.setEnabled(has_user)
+        self.act_logout.setVisible(has_user)
         self.act_logout.setEnabled(has_user)
         # Регистрация/создание пользователей — только админ/модератор
         role_key = getattr(cu, "role", "guest") if cu is not None else "guest"
@@ -1313,6 +1430,10 @@ class MainWindow(QMainWindow):
         cly.setContentsMargins(12, 8, 12, 12)
         lbl = QLabel("Введите логин и пароль.")
         cly.addWidget(lbl)
+        err_lbl = QLabel("")
+        err_lbl.setObjectName("loginErrorLabel")
+        err_lbl.setVisible(False)
+        cly.addWidget(err_lbl)
         login_edit = QLineEdit()
         login_edit.setPlaceholderText("Логин")
         cly.addWidget(login_edit)
@@ -1320,6 +1441,30 @@ class MainWindow(QMainWindow):
         pwd_edit.setPlaceholderText("Пароль")
         pwd_edit.setEchoMode(QLineEdit.EchoMode.Password)
         cly.addWidget(pwd_edit)
+        dlg.setStyleSheet(
+            HELP_DIALOG_STYLE
+            + " QLabel#loginErrorLabel { color: #fca5a5; font-size: 12px; font-weight: 600; }"
+        )
+        normal_login_style = ""
+        normal_pwd_style = ""
+        error_input_style = (
+            "QLineEdit { border: 1px solid #ef4444; background: rgba(127, 29, 29, 0.20); }"
+            "QLineEdit:focus { border: 1px solid #f87171; background: rgba(127, 29, 29, 0.28); }"
+        )
+
+        def _clear_auth_error() -> None:
+            err_lbl.clear()
+            err_lbl.setVisible(False)
+            login_edit.setStyleSheet(normal_login_style)
+            pwd_edit.setStyleSheet(normal_pwd_style)
+
+        def _show_auth_error(text: str) -> None:
+            err_lbl.setText(text)
+            err_lbl.setVisible(True)
+            login_edit.setStyleSheet(error_input_style)
+            pwd_edit.setStyleSheet(error_input_style)
+            login_edit.setFocus()
+            login_edit.selectAll()
 
         btn_row = QHBoxLayout()
         btn_ok = QPushButton("Войти")
@@ -1331,13 +1476,14 @@ class MainWindow(QMainWindow):
         ly.addWidget(content)
 
         def on_accept() -> None:
+            _clear_auth_error()
             data = _load_users()
             user = _find_user(data, login_edit.text().strip())
             if not user or user.get("password_hash") != _hash_password(pwd_edit.text()):
-                QMessageBox.warning(self, "Ошибка", "Неверный логин или пароль.")
+                _show_auth_error("Неверный логин или пароль.")
                 return
             if user.get("is_blocked"):
-                QMessageBox.warning(self, "Доступ запрещён", "Пользователь заблокирован.")
+                _show_auth_error("Пользователь заблокирован.")
                 return
             self.current_user = CurrentUser(
                 username=user["username"],
@@ -1352,6 +1498,8 @@ class MainWindow(QMainWindow):
             self._update_user_menu_state()
             dlg.accept()
 
+        login_edit.textChanged.connect(lambda _=None: _clear_auth_error())
+        pwd_edit.textChanged.connect(lambda _=None: _clear_auth_error())
         btn_ok.clicked.connect(on_accept)
         btn_cancel.clicked.connect(dlg.reject)
         QShortcut(QKeySequence("Escape"), dlg, dlg.reject)
@@ -1922,11 +2070,13 @@ class MainWindow(QMainWindow):
 
     def _check_for_updates_on_startup(self) -> None:
         """Проверка обновлений при запуске: при наличии новой версии показывается попап слева снизу."""
+        self._set_update_search_progress(True)
         if not hasattr(self, "_network_manager"):
             self._network_manager = QNetworkAccessManager(self)
         request = QNetworkRequest(QUrl(GITHUB_RELEASES_API))
         request.setRawHeader(b"User-Agent", b"WboBAMP-Updater/1.0")
         reply = self._network_manager.get(request)
+        reply.downloadProgress.connect(self._on_update_search_download_progress)
         reply.finished.connect(lambda: self._on_startup_update_check_finished(reply))
 
     def _on_startup_update_check_finished(self, reply: QNetworkReply) -> None:
@@ -1948,12 +2098,13 @@ class MainWindow(QMainWindow):
                 reply.deleteLater()
             except Exception:
                 pass
+        finally:
+            self._set_update_search_progress(False)
 
     def _show_update_available_popup(self, release_doc: dict) -> None:
         """Стильное окно «Доступно обновление» слева снизу: иконка, текст, кнопка «Обновить», крестик. Закрытие на крестик — при следующем запуске уведомление появится снова."""
         tag_name = (release_doc.get("tag_name") or "").strip()
-        body = (release_doc.get("body") or "").strip()
-        first_line = body.split("\n")[0][:80] if body else ""
+        tag_url = f"https://github.com/divangames/WbO-BUMP/releases/tag/{tag_name}"
 
         dlg = QDialog(self)
         dlg.setWindowFlags(
@@ -1965,32 +2116,31 @@ class MainWindow(QMainWindow):
         dlg.setStyleSheet(UPDATE_AVAILABLE_POPUP_STYLE)
         dlg.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, False)
         layout = QHBoxLayout(dlg)
-        layout.setContentsMargins(14, 12, 10, 12)
-        layout.setSpacing(12)
+        layout.setContentsMargins(10, 8, 8, 8)
+        layout.setSpacing(8)
 
-        if APP_ICON_PATH.exists():
-            icon_lbl = QLabel()
-            icon_lbl.setFixedSize(40, 40)
-            pix = QPixmap(str(APP_ICON_PATH)).scaled(40, 40, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-            icon_lbl.setPixmap(pix)
-            icon_lbl.setStyleSheet("background: transparent;")
-            layout.addWidget(icon_lbl)
+        icon_lbl = QLabel()
+        icon_lbl.setFixedSize(22, 22)
+        try:
+            icon = load_phosphor_icon("Download", 18)
+            pix = icon.pixmap(18, 18)
+            if not pix.isNull():
+                icon_lbl.setPixmap(pix)
+        except Exception:
+            pass
+        icon_lbl.setStyleSheet("background: transparent;")
+        layout.addWidget(icon_lbl)
 
-        text_block = QFrame()
-        text_block.setObjectName("updatePopupTextBlock")
-        text_ly = QVBoxLayout(text_block)
-        text_ly.setContentsMargins(10, 8, 10, 8)
-        text_ly.setSpacing(2)
-        title_lbl = QLabel(f"Доступна версия {tag_name}")
+        title_lbl = QLabel("Обновись!")
         title_lbl.setObjectName("updatePopupTitle")
-        text_ly.addWidget(title_lbl)
-        if first_line:
-            sub_lbl = QLabel(first_line + ("…" if len((body or "").split("\n")[0]) > 80 else ""))
-            sub_lbl.setObjectName("updatePopupText")
-            sub_lbl.setWordWrap(True)
-            sub_lbl.setMaximumWidth(280)
-            text_ly.addWidget(sub_lbl)
-        layout.addWidget(text_block, 1)
+        layout.addWidget(title_lbl)
+        layout.addStretch(1)
+
+        btn_whats_new = QPushButton("Что нового")
+        btn_whats_new.setObjectName("updatePopupLink")
+        btn_whats_new.setToolTip("Открыть страницу релиза на GitHub")
+        btn_whats_new.clicked.connect(lambda: QDesktopServices.openUrl(QUrl(tag_url)))
+        btn_whats_new.setMinimumWidth(96)
 
         btn_update = QPushButton("Обновить")
         btn_update.setObjectName("updatePopupBtn")
@@ -2006,21 +2156,61 @@ class MainWindow(QMainWindow):
         btn_close.setFixedSize(28, 28)
         btn_close.clicked.connect(dlg.reject)
 
+        layout.addWidget(btn_whats_new)
         layout.addWidget(btn_update)
         layout.addWidget(btn_close)
 
-        dlg.setFixedHeight(72)
-        dlg.setMinimumWidth(380)
-        dlg.setMaximumWidth(420)
-        # Размещаем внутри окна приложения: слева снизу (24 px от краёв)
-        margin = 24
+        dlg.setFixedHeight(44)
+        dlg.setMinimumWidth(320)
+        dlg.setMaximumWidth(360)
+
+        self._update_available_popup = dlg
+        self._update_available_release_doc = release_doc
+        QShortcut(QKeySequence("Escape"), dlg, dlg.reject)
+        # Важно: сначала показываем диалог (Windows может центрировать при show()),
+        # затем позиционируем в левом нижнем углу и делаем лёгкую анимацию появления.
+        dlg.setWindowOpacity(0.0)
+        dlg.show()
+
+        def _place_and_animate() -> None:
+            # Ставим финальную позицию (левый нижний угол относительно главного окна)
+            self._reposition_update_available_popup()
+            try:
+                target_pos = dlg.pos()
+                # Стартовая позиция: чуть ниже финальной (slide-up)
+                start_pos = QPoint(target_pos.x(), target_pos.y() + 10)
+                dlg.move(start_pos)
+
+                anim_pos = QPropertyAnimation(dlg, b"pos", dlg)
+                anim_pos.setDuration(220)
+                anim_pos.setEasingCurve(QEasingCurve.OutCubic)
+                anim_pos.setStartValue(start_pos)
+                anim_pos.setEndValue(target_pos)
+
+                anim_op = QPropertyAnimation(dlg, b"windowOpacity", dlg)
+                anim_op.setDuration(180)
+                anim_op.setEasingCurve(QEasingCurve.OutCubic)
+                anim_op.setStartValue(0.0)
+                anim_op.setEndValue(1.0)
+
+                # Не даём анимациям быть собранными GC до завершения
+                self._update_popup_anims = (anim_pos, anim_op)
+                anim_pos.start()
+                anim_op.start()
+            except Exception:
+                dlg.setWindowOpacity(1.0)
+
+        QTimer.singleShot(0, _place_and_animate)
+
+    def _reposition_update_available_popup(self) -> None:
+        """Держит уведомление об обновлении привязанным к окну."""
+        dlg = getattr(self, "_update_available_popup", None)
+        if dlg is None or not isinstance(dlg, QDialog) or not dlg.isVisible():
+            return
+        margin = 16
         popup_h = dlg.height()
         local_bottom_left = QPoint(margin, self.height() - margin - popup_h)
-        global_pos = self.mapToGlobal(local_bottom_left)
-        dlg.move(global_pos)
-        QShortcut(QKeySequence("Escape"), dlg, dlg.reject)
-        dlg.show()
-        self._update_available_popup = dlg
+        dlg.move(self.mapToGlobal(local_bottom_left))
 
     # --- Перезапуск приложения (используется после установки FFmpeg) ---
     def _restart_app(self) -> None:
@@ -2049,9 +2239,24 @@ class MainWindow(QMainWindow):
     def mouseMoveEvent(self, event) -> None:
         if self._drag_active and self._drag_pos is not None:
             self.move(event.globalPosition().toPoint() - self._drag_pos)
+            self._reposition_update_available_popup()
             event.accept()
             return
         super().mouseMoveEvent(event)
+
+    def moveEvent(self, event) -> None:
+        try:
+            self._reposition_update_available_popup()
+        except Exception:
+            pass
+        super().moveEvent(event)
+
+    def resizeEvent(self, event) -> None:
+        try:
+            self._reposition_update_available_popup()
+        except Exception:
+            pass
+        super().resizeEvent(event)
 
     def mouseReleaseEvent(self, event) -> None:
         if event.button() == Qt.LeftButton:
@@ -2096,6 +2301,61 @@ class MainWindow(QMainWindow):
             )
             parts.append(f"видео: {video_count}")
         self.set_status_state("  •  ".join(parts) if parts else "Готов")
+
+    def _set_update_search_progress(self, searching: bool) -> None:
+        """Показывает/скрывает прогресс-полоску внизу при поиске обновлений."""
+        pb = getattr(self, "update_search_progress", None)
+        if pb is None:
+            return
+
+        # Остановим "псевдо-анимацию", если она запущена.
+        if hasattr(self, "_update_search_fallback_timer") and self._update_search_fallback_timer:
+            try:
+                self._update_search_fallback_timer.stop()
+            except Exception:
+                pass
+
+        if searching:
+            self._update_search_has_total = False
+            self._update_search_fallback_val = 0.0
+            pb.setVisible(True)
+            pb.setRange(0, 100)
+            pb.setValue(0)
+
+            # Если сеть не отдаёт total (или он 0) — заполняем плавно до ~85%,
+            # а когда придёт downloadProgress с total — выставим точное значение.
+            self._update_search_fallback_timer = QTimer(self)
+            self._update_search_fallback_timer.setInterval(80)
+
+            def _tick() -> None:
+                if getattr(self, "_update_search_has_total", False):
+                    return
+                self._update_search_fallback_val = min(85.0, self._update_search_fallback_val + 4.0)
+                pb.setValue(int(self._update_search_fallback_val))
+
+            self._update_search_fallback_timer.timeout.connect(_tick)
+            self._update_search_fallback_timer.start()
+        else:
+            pb.setRange(0, 100)
+            pb.setValue(100)
+            QTimer.singleShot(500, lambda: pb.setVisible(False))
+
+    def _on_update_search_download_progress(self, received: int, total: int) -> None:
+        """Обновляет прогресс-полоску при загрузке ответа GitHub API."""
+        pb = getattr(self, "update_search_progress", None)
+        if pb is None or not pb.isVisible():
+            return
+        if total and total > 0:
+            self._update_search_has_total = True
+            try:
+                if hasattr(self, "_update_search_fallback_timer") and self._update_search_fallback_timer:
+                    self._update_search_fallback_timer.stop()
+            except Exception:
+                pass
+            pct = int((received * 100) / float(total))
+            pct = max(0, min(100, pct))
+            pb.setRange(0, 100)
+            pb.setValue(pct)
 
     def load_video_list(self) -> None:
         """Загрузка списка видео из папки Assets/video. Видео в корне — вверху без категории; подпапки — категории с роликами внутри."""
@@ -2195,6 +2455,28 @@ class MainWindow(QMainWindow):
         self.status_state_label = QLabel("Готов")
         self.status_state_label.setObjectName("statusState")
         status_layout.addWidget(self.status_state_label)
+        # Прогресс-полоска внизу: индикатор поиска обновлений
+        self.update_search_progress = QProgressBar()
+        self.update_search_progress.setObjectName("updateSearchProgress")
+        self.update_search_progress.setRange(0, 0)  # indeterminate by default
+        self.update_search_progress.setValue(0)
+        self.update_search_progress.setTextVisible(False)
+        self.update_search_progress.setFixedHeight(8)
+        self.update_search_progress.setVisible(False)
+        self.update_search_progress.setStyleSheet(
+            """
+            QProgressBar {
+                border: none;
+                background: rgba(14, 165, 233, 0.12);
+                border-radius: 4px;
+            }
+            QProgressBar::chunk {
+                background: qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 #0ea5e9, stop:1 #38bdf8);
+                border-radius: 4px;
+            }
+            """
+        )
+        status_layout.addWidget(self.update_search_progress)
         root_layout.addWidget(status_bar)
 
         # —— 1. Карточки ——
@@ -2266,8 +2548,10 @@ class MainWindow(QMainWindow):
         center_layout.addWidget(hint2)
 
         self.lbl_image_preview = QLabel()
-        self.lbl_image_preview.setMinimumSize(140, 186)
-        self.lbl_image_preview.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        # Важно: фиксируем область превью, чтобы layout не "дергался" от setPixmap() каждый кадр.
+        # Само видео/картинка масштабируются под этот размер с KeepAspectRatio.
+        self.lbl_image_preview.setFixedSize(self.preview_target_w, self.preview_target_h)
+        self.lbl_image_preview.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
         self.lbl_image_preview.setStyleSheet(
             "background: transparent; border: 1px solid #30363d; border-radius: 8px;"
         )
@@ -2801,11 +3085,13 @@ class MainWindow(QMainWindow):
     def _check_for_updates(self) -> None:
         """Проверка обновлений через GitHub Releases API. Результат показывается в диалоге."""
         SoundPlayer.play(SOUND_CLICK)
+        self._set_update_search_progress(True)
         if not hasattr(self, "_network_manager"):
             self._network_manager = QNetworkAccessManager(self)
         request = QNetworkRequest(QUrl(GITHUB_RELEASES_API))
         request.setRawHeader(b"User-Agent", b"WboBAMP-Updater/1.0")
         reply = self._network_manager.get(request)
+        reply.downloadProgress.connect(self._on_update_search_download_progress)
         reply.finished.connect(lambda: self._on_update_check_finished(reply))
 
     def _on_update_check_finished(self, reply: QNetworkReply) -> None:
@@ -2854,6 +3140,8 @@ class MainWindow(QMainWindow):
                 "Не удалось обработать ответ сервера.\nПроверьте обновления вручную на странице релизов.",
                 release_doc=None,
             )
+        finally:
+            self._set_update_search_progress(False)
 
     def _show_update_dialog(
         self,
@@ -3501,14 +3789,12 @@ class MainWindow(QMainWindow):
             image = QImage(blob.data, width, height, bytes_per_line, QImage.Format.Format_RGB888)
             pixmap = QPixmap.fromImage(image.copy())
 
-            # Важно: сохраняем пропорции карточки.
-            # Масштабируем готовый кадр под размер превью с KeepAspectRatio,
-            # чтобы картинка не растягивалась по ширине/высоте.
-            target_size = self.lbl_image_preview.size()
-            if target_size.width() > 0 and target_size.height() > 0:
-                pixmap = pixmap.scaled(
-                    target_size, Qt.KeepAspectRatio, Qt.SmoothTransformation
-                )
+            # Масштабируем в фиксированный размер превью, чтобы не было "прыжков" от пересчёта layout.
+            pixmap = pixmap.scaled(
+                QSize(self.preview_target_w, self.preview_target_h),
+                Qt.KeepAspectRatio,
+                Qt.SmoothTransformation,
+            )
 
             self.lbl_image_preview.setPixmap(pixmap)
             self.lbl_image_preview.setText("")
@@ -3550,11 +3836,11 @@ class MainWindow(QMainWindow):
             h, w, _ = blended.shape
             image = QImage(blob.data, w, h, 3 * w, QImage.Format.Format_RGB888)
             pixmap = QPixmap.fromImage(image.copy())
-            target_size = self.lbl_image_preview.size()
-            if target_size.width() > 0 and target_size.height() > 0:
-                pixmap = pixmap.scaled(
-                    target_size, Qt.KeepAspectRatio, Qt.SmoothTransformation
-                )
+            pixmap = pixmap.scaled(
+                QSize(self.preview_target_w, self.preview_target_h),
+                Qt.KeepAspectRatio,
+                Qt.SmoothTransformation,
+            )
             self.lbl_image_preview.setPixmap(pixmap)
 
     def update_image_preview(self, path: str | None) -> None:
@@ -3571,7 +3857,9 @@ class MainWindow(QMainWindow):
             return
 
         scaled = pixmap.scaled(
-            self.lbl_image_preview.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation
+            QSize(self.preview_target_w, self.preview_target_h),
+            Qt.KeepAspectRatio,
+            Qt.SmoothTransformation,
         )
         self.lbl_image_preview.setPixmap(scaled)
         self.lbl_image_preview.setText("")
@@ -3615,6 +3903,7 @@ class MainWindow(QMainWindow):
                 curve_highlights=item.curve_highlights,
                 output_path=str(preview_path),
                 max_duration=3.0,
+                min_duration=0.0,
                 render_preset=self.render_preset,
                 export_size=export_size,
                 export_fps=float(self.export_fps),
@@ -3919,9 +4208,8 @@ class MainWindow(QMainWindow):
             self.export_gpu_turbo,
         ) = settings_dialog.get_values()
 
-        # Если пользователь включил «Турбо экспорт через GPU» — фиксируем самый быстрый режим рендера.
-        if self.export_gpu_turbo:
-            self.render_preset = "fast"
+        # Важно: «Турбо экспорт через GPU» не должен менять выбранный пользователем режим рендера.
+        # Ускорение применяется внутри render_card_video через параметр gpu_turbo.
 
         # Если выбран кодек H.264, но ffmpeg не установлен — предлагаем установить через winget.
         if self.export_codec.lower() == "h264" and _find_ffmpeg() is None:
@@ -4123,6 +4411,7 @@ class MainWindow(QMainWindow):
                     curve_highlights=item.curve_highlights,
                     output_path=out_path,
                     max_duration=8.0,
+                    min_duration=8.0,
                     progress_callback=progress_callback,
                     render_preset=self.render_preset,
                     export_size=export_size,
@@ -4228,6 +4517,7 @@ class MainWindow(QMainWindow):
                 "Экспорт завершён с ошибками",
                 msg,
                 on_open=_on_open_show_errors,
+            auto_close_seconds=None,
             )
         else:
             def _open_export_folder() -> None:
@@ -4243,6 +4533,7 @@ class MainWindow(QMainWindow):
                 f"Успешно экспортировано карточек: {success_count}.{tokens_info}",
                 on_open=self._tray_show_window,
                 on_open_folder=_open_export_folder,
+                auto_close_seconds=5.0,
             )
 
 
@@ -4425,6 +4716,7 @@ def render_card_video(
     curve_highlights: int,
     output_path: str,
     max_duration: float = 8.0,
+    min_duration: float = 0.0,
     progress_callback=None,
     render_preset: str = "balanced",
     *,
@@ -4495,9 +4787,30 @@ def render_card_video(
     # чтобы ролики были единообразными независимо от исходного видео.
     fps = float(export_fps) if export_fps and export_fps > 0 else 60.0
 
-    # Считаем максимальное число кадров (не более 8 секунд и не более max_duration)
-    effective_duration = min(8.0, max_duration)
-    max_frames = int(fps * effective_duration)
+    # Длительность ролика:
+    # - requested задаётся max_duration (исторически этот параметр использовался как "длительность рендера")
+    # - не меньше min_duration (если исходное видео достаточно длинное)
+    # - не больше длины исходного видео (эффект не может идти дольше, чем само видео)
+    requested = float(max_duration) if max_duration and max_duration > 0 else 0.0
+    min_d = float(min_duration) if min_duration and min_duration > 0 else 0.0
+
+    src_fps = float(cap.get(cv2.CAP_PROP_FPS) or 0.0)
+    src_frames = float(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0.0)
+    src_duration = (src_frames / src_fps) if (src_fps > 0 and src_frames > 0) else 0.0
+
+    target = max(min_d, requested) if (min_d > 0 or requested > 0) else 0.0
+    if src_duration > 0 and target > 0:
+        effective_duration = min(src_duration, target)
+    elif src_duration > 0:
+        effective_duration = src_duration
+    else:
+        effective_duration = target
+
+    # Страховка на случай битых метаданных: для экспорта хотим минимум 8 сек, для превью — 3 сек.
+    if effective_duration <= 0:
+        effective_duration = 8.0 if min_d >= 8.0 else 3.0
+
+    max_frames = max(1, int(round(fps * effective_duration)))
 
     # Строим LUT кривой один раз для всего ролика
     curve_lut = build_curve_lut(curve_shadows, curve_midtones, curve_highlights)
@@ -4612,9 +4925,27 @@ def render_card_video(
     frames_written = 0
 
     try:
+        # Привязка FPS исходника к выходному FPS.
+        # Если export_fps выше, чем FPS исходного ролика, нужно дублировать кадры,
+        # иначе видео "закончится" раньше и итоговый MP4 будет короче заданной длительности.
+        src_fps_for_map = src_fps if src_fps and src_fps > 0 else fps
+        src_idx = -1
+        last_frame_bgr = None
+
         while frames_written < max_frames:
-            ret, frame_bgr = cap.read()
-            if not ret:
+            # Вычисляем, какой кадр исходного видео должен соответствовать текущему выходному кадру.
+            desired_src_idx = int((frames_written * src_fps_for_map) / fps) if fps > 0 else frames_written
+            # Дочитываем исходное видео до нужного кадра, либо используем последний доступный кадр.
+            while src_idx < desired_src_idx:
+                ret, frame_bgr = cap.read()
+                if not ret:
+                    frame_bgr = None
+                    break
+                src_idx += 1
+                last_frame_bgr = frame_bgr
+
+            frame_bgr = last_frame_bgr
+            if frame_bgr is None:
                 break
 
             # Приводим кадр к нужному размеру (интерполяция по режиму)
@@ -4714,23 +5045,43 @@ def main() -> None:
     # Уменьшаем сплэш примерно на 1/3
     splash_w, splash_h = int(1024 * (2 / 3)), int(584 * (2 / 3))
     splash_pix = QPixmap(splash_w, splash_h)
-    splash_pix.fill(QColor("#020617"))
-    # Основной арт для сплэша (как на референсе); если его нет — используем старый фон
+    # Полностью прозрачная подложка: чтобы за маской не было “прямоугольного” фона.
+    splash_pix.fill(Qt.GlobalColor.transparent)
+
+    # Основной арт для сплэша:
+    # 1) splash_banka.png (если есть)
+    # 2) bg.png (новый фон)
+    # 3) bg.webp (fallback)
     bg_path = BASE_DIR / "Assets" / "images" / "splash_banka.png"
     if not bg_path.exists():
+        bg_path = BASE_DIR / "Assets" / "images" / "bg.png"
+    if not bg_path.exists():
         bg_path = BASE_DIR / "Assets" / "images" / "bg.webp"
+
     if bg_path.exists():
         try:
+            # RGB888 без альфы сделает фон непрозрачным. Если bg.png содержит альфу —
+            # лучше читать в RGBA.
             with Image.open(bg_path) as img:
-                img = img.convert("RGB")
+                if str(bg_path).lower().endswith(".png"):
+                    img = img.convert("RGBA")
+                else:
+                    img = img.convert("RGB")
+
                 img = img.resize((splash_w, splash_h), Image.LANCZOS)
                 arr = np.array(img)
-                h, w, _ = arr.shape
-                blob = np.ascontiguousarray(arr)
-                qimg = QImage(blob.data, w, h, 3 * w, QImage.Format.Format_RGB888)
+                h, w = arr.shape[0], arr.shape[1]
+                if arr.ndim == 3 and arr.shape[2] == 4:
+                    blob = np.ascontiguousarray(arr)
+                    qimg = QImage(blob.data, w, h, 4 * w, QImage.Format.Format_RGBA8888)
+                else:
+                    blob = np.ascontiguousarray(arr)
+                    qimg = QImage(blob.data, w, h, 3 * w, QImage.Format.Format_RGB888)
+
                 bg_pix = QPixmap.fromImage(qimg.copy())
                 if not bg_pix.isNull():
                     painter_bg = QPainter(splash_pix)
+                    painter_bg.setCompositionMode(QPainter.CompositionMode_SourceOver)
                     painter_bg.drawPixmap(0, 0, bg_pix)
                     painter_bg.end()
         except Exception:
@@ -4750,11 +5101,55 @@ def main() -> None:
 
     splash = QSplashScreen(base_splash)
     splash.setWindowFlag(Qt.WindowStaysOnTopHint, True)
+    splash.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+    splash.setStyleSheet("background: transparent;")
+    # Маска прозрачности по форме (закругленные углы).
+    try:
+        radius = int(min(splash_w, splash_h) * 0.06)
+        radius = max(14, radius)
+        mask = QBitmap(splash_w, splash_h)
+        mask.fill(Qt.GlobalColor.color0)
+        p_mask = QPainter(mask)
+        p_mask.setRenderHint(QPainter.Antialiasing)
+        p_mask.setBrush(Qt.GlobalColor.color1)
+        p_mask.setPen(Qt.PenStyle.NoPen)
+        p_mask.drawRoundedRect(QRect(0, 0, splash_w, splash_h), radius, radius)
+        p_mask.end()
+        splash.setMask(mask)
+    except Exception:
+        pass
+    # Плавное появление сплэша (fade-in + небольшой slide-up)
+    splash.setWindowOpacity(0.0)
     splash.show()
+    app.processEvents()
+    try:
+        target_pos = splash.pos()
+        start_pos = QPoint(target_pos.x(), target_pos.y() + 12)
+        splash.move(start_pos)
+
+        anim_in_pos = QPropertyAnimation(splash, b"pos", splash)
+        anim_in_pos.setDuration(420)
+        anim_in_pos.setEasingCurve(QEasingCurve.OutCubic)
+        anim_in_pos.setStartValue(start_pos)
+        anim_in_pos.setEndValue(target_pos)
+
+        anim_in_op = QPropertyAnimation(splash, b"windowOpacity", splash)
+        anim_in_op.setDuration(300)
+        anim_in_op.setEasingCurve(QEasingCurve.OutCubic)
+        anim_in_op.setStartValue(0.0)
+        anim_in_op.setEndValue(1.0)
+
+        anim_in_pos.start()
+        anim_in_op.start()
+        while anim_in_op.state() == QAbstractAnimation.Running:
+            app.processEvents()
+            time.sleep(0.01)
+    except Exception:
+        splash.setWindowOpacity(1.0)
     app.processEvents()
 
     start_ts = time.monotonic()
-    duration = 6.0
+    duration = 8.0
     while True:
         elapsed = time.monotonic() - start_ts
         progress = max(0.0, min(1.0, elapsed / duration))
@@ -4801,6 +5196,29 @@ def main() -> None:
 
     window = MainWindow()
     window.show()
+    # Плавное исчезновение сплэша (fade-out + небольшой slide-down) перед передачей фокуса окну
+    try:
+        start_pos = splash.pos()
+        end_pos = QPoint(start_pos.x(), start_pos.y() + 12)
+        anim_out_pos = QPropertyAnimation(splash, b"pos", splash)
+        anim_out_pos.setDuration(320)
+        anim_out_pos.setEasingCurve(QEasingCurve.InCubic)
+        anim_out_pos.setStartValue(start_pos)
+        anim_out_pos.setEndValue(end_pos)
+
+        anim_out_op = QPropertyAnimation(splash, b"windowOpacity", splash)
+        anim_out_op.setDuration(280)
+        anim_out_op.setEasingCurve(QEasingCurve.InCubic)
+        anim_out_op.setStartValue(1.0)
+        anim_out_op.setEndValue(0.0)
+
+        anim_out_pos.start()
+        anim_out_op.start()
+        while anim_out_op.state() == QAbstractAnimation.Running:
+            app.processEvents()
+            time.sleep(0.01)
+    except Exception:
+        pass
     splash.finish(window)
     # Звук старта интерфейса после прелоада
     SoundPlayer.play(SOUND_OPEN)

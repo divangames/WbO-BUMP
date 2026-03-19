@@ -68,6 +68,45 @@ set "BINDEST=dist\WboBAMP\bin"
 if exist "%BINDEST%" rmdir /S /Q "%BINDEST%"
 if exist "bin" xcopy /E /I /Y "bin" "%BINDEST%"
 
+echo.
+echo Copy users.json...
+if exist "users.json" copy /Y "users.json" "dist\WboBAMP\users.json" >nul
+
+echo.
+echo Generate RELEASE_NOTES.md for GitHub...
+set "NOTES=dist\WboBAMP\RELEASE_NOTES.md"
+where powershell >nul 2>&1
+if errorlevel 1 (
+    echo   PowerShell not found, skip RELEASE_NOTES.md
+) else (
+    powershell -NoProfile -ExecutionPolicy Bypass -Command ^
+      "$ErrorActionPreference='SilentlyContinue';" ^
+      "$notes = Resolve-Path -LiteralPath 'dist\WboBAMP' -ErrorAction Stop; $notes = Join-Path $notes 'RELEASE_NOTES.md';" ^
+      "$hasGit = (Get-Command git -ErrorAction SilentlyContinue) -ne $null;" ^
+      "$lines = New-Object System.Collections.Generic.List[string];" ^
+      "$lines.Add('## Release notes') | Out-Null;" ^
+      "$lines.Add(('Generated: ' + (Get-Date).ToString('yyyy-MM-dd HH:mm:ss'))) | Out-Null;" ^
+      "$lines.Add('') | Out-Null;" ^
+      "if (-not $hasGit) { $lines.Add('Git not found. Fill release notes manually.') | Out-Null; $lines | Set-Content -LiteralPath $notes -Encoding UTF8; exit 0 }" ^
+      "$sha = (git rev-parse --short HEAD 2>$null); $branch = (git rev-parse --abbrev-ref HEAD 2>$null);" ^
+      "$lines.Add(('Commit: ' + $sha + ' (' + $branch + ')')) | Out-Null;" ^
+      "$lastTag = (git describe --tags --abbrev=0 2>$null);" ^
+      "if ([string]::IsNullOrWhiteSpace($lastTag)) { $range = 'HEAD~50..HEAD'; $lines.Add('Range: last 50 commits') | Out-Null } else { $range = ($lastTag + '..HEAD'); $lines.Add(('Range: ' + $range)) | Out-Null }" ^
+      "$lines.Add('') | Out-Null;" ^
+      "$lines.Add('### Changes') | Out-Null;" ^
+      "$log = (git log $range --pretty=format:'- %s (%h)' 2>$null);" ^
+      "if ([string]::IsNullOrWhiteSpace($log)) { $lines.Add('- (no commits found)') | Out-Null } else { $lines.AddRange($log -split \"`n\") | Out-Null }" ^
+      "$lines.Add('') | Out-Null;" ^
+      "$lines.Add('### Notes') | Out-Null;" ^
+      "$lines.Add('- TODO: add user-facing highlights here') | Out-Null;" ^
+      "$lines | Set-Content -LiteralPath $notes -Encoding UTF8;"
+    if errorlevel 1 (
+        echo   Failed to generate RELEASE_NOTES.md
+    ) else (
+        echo   Created: %NOTES%
+    )
+)
+
 echo Creating launcher (run exe with console to see errors)...
 set "LAUNCH=dist\WboBAMP\run_here.bat"
 echo @echo off > "%LAUNCH%"

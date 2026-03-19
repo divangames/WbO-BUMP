@@ -2,11 +2,11 @@
   "last_export_path": "D:/Программирование/WBO Animation/export",
   "last_images_path": "D:\\Программирование\\WBO Animation\\Assets\\demo",
   "last_video_path": "D:\\Программирование\\WBO Animation\\Assets\\video",
-  "render_preset": "fast",
+  "render_preset": "balanced",
   "export_codec": "h264",
   "export_size": "900x1200",
   "export_fps": 60,
-  "auth_username": "Delbraun",
+  "auth_username": "",
   "export_group_by_card_folder": true,
   "export_gpu_turbo": true
 }

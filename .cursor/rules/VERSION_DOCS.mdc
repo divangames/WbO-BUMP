@@ -1,0 +1,26 @@
+---
+description: On version changes, update README + GitHub release notes
+alwaysApply: true
+---
+
+# Version docs convention
+
+Whenever `APP_VERSION` (in `main.py`) or `MyAppVersion` (in `installer.iss`) is changed, the agent must:
+
+1. Update `README.md`
+   - Set `## Версия` “Текущая версия” to the new version.
+   - Rename `## Что изменилось (...)` header to the new version.
+
+2. Provide GitHub release-ready text (Markdown)
+   - Create/update a section for the new version with:
+     - `## vX.Y.Z` header
+     - bullet list using `-` (flat list)
+     - short “Notes” paragraph about any important limitations (e.g., auto-updater supports ZIP file copy, not deletions).
+
+3. Keep everything consistent
+   - Ensure the version string used in code/installers matches what is written into `README.md`.
+
+## Output format to use in responses
+- Paste the GitHub release text in a fenced Markdown block.
+- Do not include file paths with line numbers.
+
