@@ -34,17 +34,14 @@ from PySide6.QtWidgets import (
     QScrollArea,
     QSizePolicy,
     QSizeGrip,
-    QSplashScreen,
     QSystemTrayIcon,
     QMenu,
 )
 from PySide6.QtGui import (
     QPixmap,
     QPainter,
-    QPen,
     QColor,
     QImage,
-    QBitmap,
     QIcon,
     QGuiApplication,
     QAction,
@@ -64,10 +61,8 @@ from PySide6.QtCore import (
     QProcess,
     QSettings,
     QPoint,
-    QRect,
     QPropertyAnimation,
     QEasingCurve,
-    QAbstractAnimation,
 )
 from PySide6.QtNetwork import QNetworkAccessManager, QNetworkRequest, QNetworkReply
 
@@ -87,7 +82,7 @@ from ui_common import DialogTitleBar
 # Версия приложения (для статус-бара, «О программе» и сплэша)
 # Версия приложения (для статус-бара, «О программе» и сплэша)
 # Формат: для корректного сравнения в автоапдейтере используем только цифры через точки.
-APP_VERSION = "0.1.2.2.3"
+APP_VERSION = "0.1.2.2.4"
 
 # Проверка обновлений: последний релиз на GitHub
 GITHUB_RELEASES_API = "https://api.github.com/repos/divangames/WbO-BUMP/releases/latest"
@@ -107,7 +102,6 @@ SOUND_CLICK = BASE_DIR / "Assets" / "sound" / "click.mp3"
 SOUND_PORTFOLIO = BASE_DIR / "Assets" / "sound" / "portfolio.mp3"
 SOUND_OPEN = BASE_DIR / "Assets" / "sound" / "open.mp3"
 SOUND_DIALOG = BASE_DIR / "Assets" / "sound" / "dialog.mp3"
-SOUND_SPLASH_BANKA = BASE_DIR / "Assets" / "sound" / "banka_01.mp3"
 
 ICONS_DIR = BASE_DIR / "Assets" / "icons"
 FONTS_DIR = BASE_DIR / "Assets" / "fonts"
@@ -505,23 +499,6 @@ APP_STYLESHEET = """
     }
     QSlider::handle:horizontal:pressed {
         background: #8b949e;
-    }
-    /* Ползунки кривой — тоньше, аккуратнее */
-    QSlider#curveSlider::groove:horizontal {
-        height: 3px;
-        border-radius: 2px;
-    }
-    QSlider#curveSlider::sub-page:horizontal {
-        border-radius: 2px;
-    }
-    QSlider#curveSlider::add-page:horizontal {
-        border-radius: 2px;
-    }
-    QSlider#curveSlider::handle:horizontal {
-        width: 10px;
-        height: 10px;
-        margin: -4px 0;
-        border-radius: 5px;
     }
     QCheckBox {
         color: #e6edf3;
@@ -999,12 +976,14 @@ CONFIG_FILE = "wbo_config.json"
 
 def load_config() -> dict:
     """Загрузка конфигурации приложения (последний путь экспорта и т.п.)."""
+    default_images_path = str(Path.cwd())
+    default_video_path = str((BASE_DIR / "Assets" / "video").resolve())
     # Комментарии на русском: если файл не найден, возвращаем конфиг по умолчанию
     if not os.path.exists(CONFIG_FILE):
         return {
             "last_export_path": str(Path.cwd()),
-            "last_images_path": str(Path("Assets/demo").resolve()),
-            "last_video_path": str(Path("Assets/video").resolve()),
+            "last_images_path": default_images_path,
+            "last_video_path": default_video_path,
             # Качество рендера: quality / balanced / fast
             "render_preset": "balanced",
             # Настройки экспорта (сохраняются между запусками)
@@ -1028,8 +1007,8 @@ def load_config() -> dict:
         # Если не удалось прочитать конфиг — используем значения по умолчанию
         data = {}
     data.setdefault("last_export_path", str(Path.cwd()))
-    data.setdefault("last_images_path", str(Path("Assets/demo").resolve()))
-    data.setdefault("last_video_path", str(Path("Assets/video").resolve()))
+    data.setdefault("last_images_path", default_images_path)
+    data.setdefault("last_video_path", default_video_path)
     data.setdefault("render_preset", "balanced")
     data.setdefault("export_codec", "h264")
     data.setdefault("export_size", "900x1200")
@@ -1037,6 +1016,9 @@ def load_config() -> dict:
     data.setdefault("export_group_by_card_folder", True)
     data.setdefault("export_gpu_turbo", False)
     data.setdefault("auth_username", "")
+    images_path = data.get("last_images_path", default_images_path)
+    if not Path(images_path).exists():
+        data["last_images_path"] = default_images_path
     return data
 
 
@@ -1048,6 +1030,23 @@ def save_config(data: dict) -> None:
     except Exception:
         # Нам важно не падать, если конфиг не сохранился
         pass
+
+
+def ask_yes_no(parent, title: str, text: str) -> bool:
+    """Диалог Да/Нет: Enter и кнопка по умолчанию — «Да»."""
+    box = QMessageBox(parent)
+    box.setWindowTitle(title)
+    box.setText(text)
+    box.setIcon(QMessageBox.Icon.Question)
+    box.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+    box.setDefaultButton(QMessageBox.StandardButton.Yes)
+    yes_btn = box.button(QMessageBox.StandardButton.Yes)
+    no_btn = box.button(QMessageBox.StandardButton.No)
+    if yes_btn is not None:
+        yes_btn.setText("Да")
+    if no_btn is not None:
+        no_btn.setText("Нет")
+    return box.exec() == QMessageBox.StandardButton.Yes
 
 
 class ImageItemData:
@@ -1063,46 +1062,6 @@ class ImageItemData:
         self.curve_shadows: int = 64
         self.curve_midtones: int = 128
         self.curve_highlights: int = 192
-
-
-class CurvePreviewLabel(QLabel):
-    """Превью графика кривой с возможностью изменения точек по клику/перетаскиванию."""
-
-    def __init__(self, parent: "MainWindow", size: int = 128) -> None:
-        super().__init__(parent)
-        self._main = parent
-        self._size = size
-        self._margin = 14
-        self.setFixedSize(size, size)
-        self.setStyleSheet(
-            "background: transparent; border: 1px solid #30363d; border-radius: 6px;"
-        )
-        self.setAlignment(Qt.AlignCenter)
-        self.setCursor(Qt.CursorShape.CrossCursor)
-        self.setMouseTracking(True)
-        self.setToolTip("Клик или перетаскивание по графику меняет точку (тени / средние / света)")
-
-    def _widget_to_curve(self, x: int, y: int) -> tuple[int, int]:
-        """Преобразование координат виджета в (x_in 0–255, y_out 0–255)."""
-        m = self._margin
-        g = self._size - 2 * m
-        if g <= 0:
-            return 128, 128
-        x_in = int(255 * (x - m) / g)
-        y_out = int(255 * (m + g - y) / g)
-        return max(0, min(255, x_in)), max(0, min(255, y_out))
-
-    def mousePressEvent(self, event) -> None:
-        super().mousePressEvent(event)
-        if event.button() == Qt.MouseButton.LeftButton and self._main is not None:
-            x_in, y_out = self._widget_to_curve(event.position().x(), event.position().y())
-            self._main._on_curve_preview_clicked(x_in, y_out)
-
-    def mouseMoveEvent(self, event) -> None:
-        super().mouseMoveEvent(event)
-        if event.buttons() & Qt.MouseButton.LeftButton and self._main is not None:
-            x_in, y_out = self._widget_to_curve(event.position().x(), event.position().y())
-            self._main._on_curve_preview_clicked(x_in, y_out)
 
 
 class ImageListWidget(QListWidget):
@@ -1254,13 +1213,6 @@ class MainWindow(QMainWindow):
 
         # Загружаем список доступных видео из папки Assets/video
         self.load_video_list()
-
-        # При старте загружаем демо-изображения, если есть; выбираем первую карточку, чтобы превью с видео сразу показывалось
-        demo_dir = BASE_DIR / "Assets" / "demo"
-        if demo_dir.exists():
-            self.load_images_from_dir(str(demo_dir.resolve()))
-        if self.list_widget.count() > 0 and self.list_widget.currentRow() < 0:
-            self.list_widget.setCurrentRow(0)
 
         # Проверка обновлений при запуске: через 1.8 с показывается попап слева снизу при наличии новой версии
         QTimer.singleShot(1800, self._check_for_updates_on_startup)
@@ -2011,14 +1963,12 @@ class MainWindow(QMainWindow):
             if is_moderator and target_role == "admin":
                 QMessageBox.warning(dlg, "Запрещено", "Модератор не может удалять администратора.")
                 return
-            reply = QMessageBox.question(
+            reply = ask_yes_no(
                 dlg,
                 "Удалить пользователя",
                 f"Точно удалить пользователя '{username}'?\nЭто действие нельзя отменить.",
-                QMessageBox.Yes | QMessageBox.No,
-                QMessageBox.No,
             )
-            if reply != QMessageBox.Yes:
+            if not reply:
                 return
             users.pop(row)
             _save_users({"users": users})
@@ -2651,52 +2601,6 @@ class MainWindow(QMainWindow):
         self.lbl_selected_video = QLabel("Видео: общее")
         self.lbl_selected_video.setObjectName("stepHint")
 
-        curve_panel = QFrame()
-        curve_panel.setObjectName("panel")
-        curve_pl = QVBoxLayout(curve_panel)
-        curve_pl.setSpacing(4)
-        curve_sec = QLabel("Кривая: тени / средние / света")
-        curve_sec.setObjectName("sectionLabel")
-        curve_pl.addWidget(curve_sec)
-        curve_top = QHBoxLayout()
-        self.lbl_curve_preview = CurvePreviewLabel(self, 128)
-        curve_top.addWidget(self.lbl_curve_preview)
-        sliders_col = QVBoxLayout()
-        sliders_col.setSpacing(2)
-        self.lbl_curve_shadows = QLabel("Тени: 64")
-        sliders_col.addWidget(self.lbl_curve_shadows)
-        self.slider_curve_shadows = QSlider(Qt.Horizontal)
-        self.slider_curve_shadows.setObjectName("curveSlider")
-        self.slider_curve_shadows.setMaximumHeight(20)
-        self.slider_curve_shadows.setMinimum(0)
-        self.slider_curve_shadows.setMaximum(255)
-        self.slider_curve_shadows.setValue(64)
-        self.slider_curve_shadows.valueChanged.connect(self.on_curve_shadows_changed)
-        sliders_col.addWidget(self.slider_curve_shadows)
-        self.lbl_curve_midtones = QLabel("Средние: 128")
-        sliders_col.addWidget(self.lbl_curve_midtones)
-        self.slider_curve_midtones = QSlider(Qt.Horizontal)
-        self.slider_curve_midtones.setObjectName("curveSlider")
-        self.slider_curve_midtones.setMaximumHeight(20)
-        self.slider_curve_midtones.setMinimum(0)
-        self.slider_curve_midtones.setMaximum(255)
-        self.slider_curve_midtones.setValue(128)
-        self.slider_curve_midtones.valueChanged.connect(self.on_curve_midtones_changed)
-        sliders_col.addWidget(self.slider_curve_midtones)
-        self.lbl_curve_highlights = QLabel("Света: 192")
-        sliders_col.addWidget(self.lbl_curve_highlights)
-        self.slider_curve_highlights = QSlider(Qt.Horizontal)
-        self.slider_curve_highlights.setObjectName("curveSlider")
-        self.slider_curve_highlights.setMaximumHeight(20)
-        self.slider_curve_highlights.setMinimum(0)
-        self.slider_curve_highlights.setMaximum(255)
-        self.slider_curve_highlights.setValue(192)
-        self.slider_curve_highlights.valueChanged.connect(self.on_curve_highlights_changed)
-        sliders_col.addWidget(self.slider_curve_highlights)
-        curve_top.addLayout(sliders_col, 1)
-        curve_pl.addLayout(curve_top)
-        right_layout.addWidget(curve_panel)
-
         self.btn_export_main = QPushButton(" Экспорт ")
         self.btn_export_main.setProperty("class", "primary")
         self.btn_export_main.setToolTip("Экспорт выбранных или всех карточек в MP4 (Ctrl+Shift+E)")
@@ -2854,10 +2758,9 @@ class MainWindow(QMainWindow):
             "Основной сценарий работы:\n"
             "1. Слева загрузите изображения карточек (иконка папки).\n"
             "2. Выберите видео в блоке «Список видео» справа.\n"
-            "3. Настройте кривую (тени / средние / света).\n"
-            "4. Для предпросмотра используйте большую область в центре — видео\n"
+            "3. Для предпросмотра используйте большую область в центре — видео\n"
             "   накладывается в реальном времени в режиме «Экран».\n"
-            "5. Экспортируйте карточки в MP4 кнопкой внизу справа.\n\n"
+            "4. Экспортируйте карточки в MP4 кнопкой внизу справа.\n\n"
             "Горячие клавиши:\n"
             f"{hotkeys_text}\n\n"
             "Поддерживаются форматы изображений: JPG, PNG, WEBP.\n"
@@ -3401,11 +3304,6 @@ class MainWindow(QMainWindow):
         self.add_images_from_files(files, clear_existing=False)
 
         if not self.items:
-            QMessageBox.information(
-                self,
-                "Нет изображений",
-                "В выбранной папке не найдено подходящих изображений (jpg, png, webp).",
-            )
             return
 
         # Выбираем первую карточку, чтобы превью наложения и видео сразу отобразились
@@ -3462,6 +3360,8 @@ class MainWindow(QMainWindow):
     def on_load_images_clicked(self) -> None:
         """Выбор папки с изображениями."""
         start_dir = self.config.get("last_images_path", str(Path.cwd()))
+        if not Path(start_dir).exists():
+            start_dir = str(Path.cwd())
         directory = QFileDialog.getExistingDirectory(
             self,
             "Выберите папку с изображениями",
@@ -3488,7 +3388,6 @@ class MainWindow(QMainWindow):
             self.lbl_selected_image.setText("Карточка не выбрана")
             self.lbl_selected_video.setText("Видео не выбрано (используется общее)")
             self.update_image_preview(None)
-            self._draw_curve_preview(64, 128, 192)  # нейтральная кривая в превью
             return
 
         self.lbl_selected_image.setText(item.image_path)
@@ -3496,18 +3395,6 @@ class MainWindow(QMainWindow):
             self.lbl_selected_video.setText(item.video_path)
         else:
             self.lbl_selected_video.setText("Видео не выбрано (используется общее)")
-
-        # Обновляем слайдеры кривой из данных карточки
-        self.slider_curve_shadows.blockSignals(True)
-        self.slider_curve_midtones.blockSignals(True)
-        self.slider_curve_highlights.blockSignals(True)
-        self.slider_curve_shadows.setValue(item.curve_shadows)
-        self.slider_curve_midtones.setValue(item.curve_midtones)
-        self.slider_curve_highlights.setValue(item.curve_highlights)
-        self.slider_curve_shadows.blockSignals(False)
-        self.slider_curve_midtones.blockSignals(False)
-        self.slider_curve_highlights.blockSignals(False)
-        self._update_curve_labels_and_preview()
 
         # Синхронизируем список видео: выделяем то видео, которое используется этой карточкой
         self._sync_video_list_to_card(item)
@@ -3588,93 +3475,6 @@ class MainWindow(QMainWindow):
 
         # После смены видео для общего режима или карточки — обновляем предпросмотр наложения
         self._load_preview_frames_for_current()
-
-    def on_curve_shadows_changed(self, value: int) -> None:
-        """Обновление точки «Тени» для текущей карточки."""
-        item = self.get_current_item()
-        if item:
-            item.curve_shadows = value
-        self._update_curve_labels_and_preview()
-
-    def on_curve_midtones_changed(self, value: int) -> None:
-        """Обновление точки «Средние» для текущей карточки."""
-        item = self.get_current_item()
-        if item:
-            item.curve_midtones = value
-        self._update_curve_labels_and_preview()
-
-    def on_curve_highlights_changed(self, value: int) -> None:
-        """Обновление точки «Света» для текущей карточки."""
-        item = self.get_current_item()
-        if item:
-            item.curve_highlights = value
-        self._update_curve_labels_and_preview()
-
-    def _update_curve_labels_and_preview(self) -> None:
-        """Обновление подписей слайдеров и мини-графика кривой."""
-        s = self.slider_curve_shadows.value()
-        m = self.slider_curve_midtones.value()
-        h = self.slider_curve_highlights.value()
-        self.lbl_curve_shadows.setText(f"Тени: {s}")
-        self.lbl_curve_midtones.setText(f"Средние: {m}")
-        self.lbl_curve_highlights.setText(f"Света: {h}")
-        self._draw_curve_preview(s, m, h)
-        # Обновляем быстрое превью наложения
-        self._update_overlay_preview(s, m, h)
-
-    def _draw_curve_preview(self, shadows: int, midtones: int, highlights: int) -> None:
-        """Отрисовка мини-графика кривой по трём точкам (тени/средние/света)."""
-        w = h = self.lbl_curve_preview._size if hasattr(self.lbl_curve_preview, "_size") else 128
-        pixmap = QPixmap(w, h)
-        pixmap.fill(QColor("#2a2a2a"))
-        painter = QPainter(pixmap)
-        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
-
-        # Сетка и оси: вход по X, выход по Y (0 внизу)
-        margin = self.lbl_curve_preview._margin if hasattr(self.lbl_curve_preview, "_margin") else 14
-        graph_w = w - 2 * margin
-        graph_h = h - 2 * margin
-        painter.setPen(QPen(QColor("#555"), 1))
-        painter.drawRect(margin, margin, graph_w, graph_h)
-        # Диагональ (линейная кривая)
-        painter.setPen(QPen(QColor("#444"), 1))
-        painter.drawLine(margin, margin + graph_h, margin + graph_w, margin)
-
-        # Строим LUT и рисуем кривую
-        lut = build_curve_lut(shadows, midtones, highlights)
-        pts = []
-        for x_in in range(256):
-            y_out = int(lut[x_in])
-            px = margin + (x_in / 255.0) * graph_w
-            py = margin + graph_h - (y_out / 255.0) * graph_h
-            pts.append((px, py))
-        painter.setPen(QPen(QColor("#0cf"), 1))
-        for i in range(len(pts) - 1):
-            painter.drawLine(int(pts[i][0]), int(pts[i][1]), int(pts[i + 1][0]), int(pts[i + 1][1]))
-
-        # Точки управления (кружки)
-        for x_in, y_out in [(64, shadows), (128, midtones), (192, highlights)]:
-            px = margin + (x_in / 255.0) * graph_w
-            py = margin + graph_h - (y_out / 255.0) * graph_h
-            painter.setPen(QPen(QColor("#fff"), 1))
-            painter.setBrush(QColor("#0cf"))
-            painter.drawEllipse(int(px - 2), int(py - 2), 4, 4)
-
-        painter.end()
-        self.lbl_curve_preview.setPixmap(pixmap)
-
-    def _on_curve_preview_clicked(self, x_in: int, y_out: int) -> None:
-        """Реакция на клик/перетаскивание по графику кривой: обновляем ближайшую точку управления."""
-        points = [(64, 0), (128, 1), (192, 2)]
-        nearest = min(points, key=lambda p: abs(p[0] - x_in))
-        idx = nearest[1]
-        value = max(0, min(255, y_out))
-        if idx == 0:
-            self.slider_curve_shadows.setValue(value)
-        elif idx == 1:
-            self.slider_curve_midtones.setValue(value)
-        else:
-            self.slider_curve_highlights.setValue(value)
 
     def _stop_preview_video(self) -> None:
         """Остановка таймера и освобождение видеопотока превью."""
@@ -3776,10 +3576,7 @@ class MainWindow(QMainWindow):
         frame_bgr = cv2.resize(frame_bgr, (base_w, base_h), interpolation=cv2.INTER_AREA)
         frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
         self.preview_last_frame = frame_rgb.copy()
-        s = self.slider_curve_shadows.value()
-        m = self.slider_curve_midtones.value()
-        h = self.slider_curve_highlights.value()
-        lut = build_curve_lut(s, m, h)
+        lut = build_curve_lut(item.curve_shadows, item.curve_midtones, item.curve_highlights)
         curved = apply_curve_lut(frame_rgb, lut)
         blended = screen_blend(self.preview_base_frame, curved)
         try:
@@ -3823,25 +3620,6 @@ class MainWindow(QMainWindow):
         else:
             self._preview_timer.stop()
             self.btn_preview_play_pause.setIcon(load_phosphor_icon("video-camera", 18))
-
-    def _update_overlay_preview(self, shadows: int, midtones: int, highlights: int) -> None:
-        """Однокадровое обновление превью (при смене слайдеров кривой). При воспроизведении следующий тик применит новую кривую; при паузе перерисовываем текущий кадр."""
-        if self.preview_base_frame is None or self.preview_cap is None or not self.preview_cap.isOpened():
-            return
-        if not self.preview_playing and self.preview_last_frame is not None:
-            lut = build_curve_lut(shadows, midtones, highlights)
-            curved = apply_curve_lut(self.preview_last_frame, lut)
-            blended = screen_blend(self.preview_base_frame, curved)
-            blob = np.ascontiguousarray(blended)
-            h, w, _ = blended.shape
-            image = QImage(blob.data, w, h, 3 * w, QImage.Format.Format_RGB888)
-            pixmap = QPixmap.fromImage(image.copy())
-            pixmap = pixmap.scaled(
-                QSize(self.preview_target_w, self.preview_target_h),
-                Qt.KeepAspectRatio,
-                Qt.SmoothTransformation,
-            )
-            self.lbl_image_preview.setPixmap(pixmap)
 
     def update_image_preview(self, path: str | None) -> None:
         """Обновление превью изображения для выбранной карточки."""
@@ -3969,7 +3747,7 @@ class MainWindow(QMainWindow):
         self.on_export_clicked()
 
     def on_delete_selected_clicked(self) -> None:
-        """Удаление выбранных карточек с подтверждением."""
+        """Удаление выбранных карточек без подтверждения."""
         selected_rows = sorted({idx.row() for idx in self.list_widget.selectedIndexes()})
         if not selected_rows:
             QMessageBox.information(
@@ -3977,17 +3755,6 @@ class MainWindow(QMainWindow):
                 "Нет выбранных карточек",
                 "Сначала выделите одну или несколько карточек слева.",
             )
-            return
-
-        count = len(selected_rows)
-        reply = QMessageBox.question(
-            self,
-            "Удалить карточки",
-            f"Вы действительно хотите удалить {count} выбранн(ую/ые) карточк(у/и)?",
-            QMessageBox.Yes | QMessageBox.No,
-            QMessageBox.No,
-        )
-        if reply != QMessageBox.Yes:
             return
 
         # Удаляем элементы снизу вверх, чтобы индексы не сдвигались
@@ -4239,14 +4006,11 @@ class MainWindow(QMainWindow):
                 except Exception:
                     pass
 
-                restart = QMessageBox.question(
+                if ask_yes_no(
                     self,
                     "Перезапуск приложения",
                     "После успешной установки FFmpeg перезапустить Wbo BAMP?",
-                    QMessageBox.Yes | QMessageBox.No,
-                    QMessageBox.Yes,
-                )
-                if restart == QMessageBox.Yes:
+                ):
                     self._restart_app()
                 # Текущий экспорт не выполняем
                 return
@@ -5041,186 +4805,8 @@ def main() -> None:
     if _google_sans_family:
         app.setFont(QFont(_google_sans_family, 13))
 
-    # Прелоад-окно (splash): фирменный арт + информация, как на референсе
-    # Уменьшаем сплэш примерно на 1/3
-    splash_w, splash_h = int(1024 * (2 / 3)), int(584 * (2 / 3))
-    splash_pix = QPixmap(splash_w, splash_h)
-    # Полностью прозрачная подложка: чтобы за маской не было “прямоугольного” фона.
-    splash_pix.fill(Qt.GlobalColor.transparent)
-
-    # Основной арт для сплэша:
-    # 1) splash_banka.png (если есть)
-    # 2) bg.png (новый фон)
-    # 3) bg.webp (fallback)
-    bg_path = BASE_DIR / "Assets" / "images" / "splash_banka.png"
-    if not bg_path.exists():
-        bg_path = BASE_DIR / "Assets" / "images" / "bg.png"
-    if not bg_path.exists():
-        bg_path = BASE_DIR / "Assets" / "images" / "bg.webp"
-
-    if bg_path.exists():
-        try:
-            # RGB888 без альфы сделает фон непрозрачным. Если bg.png содержит альфу —
-            # лучше читать в RGBA.
-            with Image.open(bg_path) as img:
-                if str(bg_path).lower().endswith(".png"):
-                    img = img.convert("RGBA")
-                else:
-                    img = img.convert("RGB")
-
-                img = img.resize((splash_w, splash_h), Image.LANCZOS)
-                arr = np.array(img)
-                h, w = arr.shape[0], arr.shape[1]
-                if arr.ndim == 3 and arr.shape[2] == 4:
-                    blob = np.ascontiguousarray(arr)
-                    qimg = QImage(blob.data, w, h, 4 * w, QImage.Format.Format_RGBA8888)
-                else:
-                    blob = np.ascontiguousarray(arr)
-                    qimg = QImage(blob.data, w, h, 3 * w, QImage.Format.Format_RGB888)
-
-                bg_pix = QPixmap.fromImage(qimg.copy())
-                if not bg_pix.isNull():
-                    painter_bg = QPainter(splash_pix)
-                    painter_bg.setCompositionMode(QPainter.CompositionMode_SourceOver)
-                    painter_bg.drawPixmap(0, 0, bg_pix)
-                    painter_bg.end()
-        except Exception:
-            pass
-    # На сплэше больше нет текста — только сам арт и лоадбар.
-    # Оставляем try/except на случай проблем с изображением.
-    try:
-        _ = splash_pix.width()  # заглушка, чтобы блок не был пустым
-    except Exception:
-        pass
-
-    # Базовое изображение сплэша для анимации прогресс-бара
-    base_splash = splash_pix.copy()
-
-    # Звук запуска бренда на время показа сплэш-экрана
-    SoundPlayer.play(SOUND_SPLASH_BANKA)
-
-    splash = QSplashScreen(base_splash)
-    splash.setWindowFlag(Qt.WindowStaysOnTopHint, True)
-    splash.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
-    splash.setStyleSheet("background: transparent;")
-    # Маска прозрачности по форме (закругленные углы).
-    try:
-        radius = int(min(splash_w, splash_h) * 0.06)
-        radius = max(14, radius)
-        mask = QBitmap(splash_w, splash_h)
-        mask.fill(Qt.GlobalColor.color0)
-        p_mask = QPainter(mask)
-        p_mask.setRenderHint(QPainter.Antialiasing)
-        p_mask.setBrush(Qt.GlobalColor.color1)
-        p_mask.setPen(Qt.PenStyle.NoPen)
-        p_mask.drawRoundedRect(QRect(0, 0, splash_w, splash_h), radius, radius)
-        p_mask.end()
-        splash.setMask(mask)
-    except Exception:
-        pass
-    # Плавное появление сплэша (fade-in + небольшой slide-up)
-    splash.setWindowOpacity(0.0)
-    splash.show()
-    app.processEvents()
-    try:
-        target_pos = splash.pos()
-        start_pos = QPoint(target_pos.x(), target_pos.y() + 12)
-        splash.move(start_pos)
-
-        anim_in_pos = QPropertyAnimation(splash, b"pos", splash)
-        anim_in_pos.setDuration(420)
-        anim_in_pos.setEasingCurve(QEasingCurve.OutCubic)
-        anim_in_pos.setStartValue(start_pos)
-        anim_in_pos.setEndValue(target_pos)
-
-        anim_in_op = QPropertyAnimation(splash, b"windowOpacity", splash)
-        anim_in_op.setDuration(300)
-        anim_in_op.setEasingCurve(QEasingCurve.OutCubic)
-        anim_in_op.setStartValue(0.0)
-        anim_in_op.setEndValue(1.0)
-
-        anim_in_pos.start()
-        anim_in_op.start()
-        while anim_in_op.state() == QAbstractAnimation.Running:
-            app.processEvents()
-            time.sleep(0.01)
-    except Exception:
-        splash.setWindowOpacity(1.0)
-    app.processEvents()
-
-    start_ts = time.monotonic()
-    duration = 8.0
-    while True:
-        elapsed = time.monotonic() - start_ts
-        progress = max(0.0, min(1.0, elapsed / duration))
-
-        # Рисуем анимированный прогресс-бар снизу с лёгким свечением
-        frame = base_splash.copy()
-        try:
-            p = QPainter(frame)
-            p.setRenderHint(QPainter.Antialiasing)
-            bar_margin = 40
-            bar_height = 6
-            bar_y = frame.height() - 28
-            bar_rect_w = frame.width() - 2 * bar_margin
-            # фон бара
-            p.fillRect(bar_margin, bar_y, bar_rect_w, bar_height, QColor(15, 23, 42, 180))
-            # заполненная часть
-            fill_w = max(0, int(bar_rect_w * progress) - 2)
-            if fill_w > 0:
-                # Свечение вокруг активной части: чуть выше/ниже и шире, полупрозрачное
-                glow_alpha = int(80 + 70 * progress)
-                glow_color = QColor(14, 165, 233, glow_alpha)  # голубой с альфой
-                p.fillRect(
-                    bar_margin - 2,
-                    bar_y - 3,
-                    fill_w + 6,
-                    bar_height + 6,
-                    glow_color,
-                )
-                # Основная полоса прогресса
-                p.fillRect(bar_margin + 1, bar_y + 1, fill_w, bar_height - 2, QColor("#0ea5e9"))
-            p.end()
-        except Exception:
-            frame = base_splash
-
-        splash.setPixmap(frame)
-        app.processEvents()
-
-        if elapsed >= duration:
-            break
-        time.sleep(0.01)
-
-    # Останавливаем брендовый звук, даже если он длиннее, чем сплэш
-    SoundPlayer.stop()
-
     window = MainWindow()
     window.show()
-    # Плавное исчезновение сплэша (fade-out + небольшой slide-down) перед передачей фокуса окну
-    try:
-        start_pos = splash.pos()
-        end_pos = QPoint(start_pos.x(), start_pos.y() + 12)
-        anim_out_pos = QPropertyAnimation(splash, b"pos", splash)
-        anim_out_pos.setDuration(320)
-        anim_out_pos.setEasingCurve(QEasingCurve.InCubic)
-        anim_out_pos.setStartValue(start_pos)
-        anim_out_pos.setEndValue(end_pos)
-
-        anim_out_op = QPropertyAnimation(splash, b"windowOpacity", splash)
-        anim_out_op.setDuration(280)
-        anim_out_op.setEasingCurve(QEasingCurve.InCubic)
-        anim_out_op.setStartValue(1.0)
-        anim_out_op.setEndValue(0.0)
-
-        anim_out_pos.start()
-        anim_out_op.start()
-        while anim_out_op.state() == QAbstractAnimation.Running:
-            app.processEvents()
-            time.sleep(0.01)
-    except Exception:
-        pass
-    splash.finish(window)
-    # Звук старта интерфейса после прелоада
     SoundPlayer.play(SOUND_OPEN)
     app.exec()
 
